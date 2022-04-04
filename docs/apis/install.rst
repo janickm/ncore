@@ -1,0 +1,17 @@
+.. SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+.. SPDX-License-Identifier: Apache-2.0
+
+.. _installation: 
+
+Wheel Installation
+==================
+
+The NCore python APIs are provided as ``pip``-installable wheels maintained in PyPi at `package registry <https://test.pypi.org/manage/project/nvidia-ncore>`_.
+
+The wheels are called ``nvidia-ncore`` and can be installed by:
+
+.. code-block:: bash
+
+   pip install --index-url https://test.pypi.org/simple/ --extra-index-url https://pypi.org/simple nvidia-ncore
+
+Currently, ``nvidia-ncore`` wheels support all python version starting from ``python3.8``.

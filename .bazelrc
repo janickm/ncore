@@ -1,0 +1,40 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+# http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+# Enable local disk caching
+build --disk_cache=~/.cache/bazel/disk-cache/ncore
+build --remote_instance_name ncore
+
+# Ensure that user's own PATH/LD_LIBRARY_PATH doesn't propagate into the build/test sandbox
+build --incompatible_strict_action_env
+
+# This is needed to have tags=["no-cache"] propagate to action execution requirements
+build --incompatible_allow_tags_propagation
+
+# Check the ctime of input files of an action before uploading it to a remote cache (there may be cases where the Linux kernel delays writing of files, which could cause false positives)
+build --guard_against_concurrent_changes
+
+# Show outputs of failing tests by default
+test --test_output=errors
+
+# Config for running tests without GPU (e.g., CPU-only CI runners)
+test:no-gpu --test_env=NCORE_NO_GPU_TESTS=1
+
+# Mypy aspect registration + enable by default
+build --aspects //bazel/typing:aspects.bzl%mypy_aspect
+build --output_groups=+mypy
+
+# https://docs.bazel.build/versions/main/best-practices.html#using-the-bazelrc-file
+try-import %workspace%/.bazelrc.user

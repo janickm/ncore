@@ -1,0 +1,95 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+# http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+load("@ncore_pip_deps//:requirements.bzl", "requirement")
+load("@rules_python//python:defs.bzl", "py_library")
+load("//bazel/pytest:defs.bzl", "pytest_test")
+
+package(default_visibility = ["//:code_package_group"])
+
+py_library(
+    name = "pylib_types",
+    srcs = [
+        "types.py",
+    ],
+    deps = [
+        ":pylib_util",
+        "//ncore/impl/common:pylib_transformations",
+        requirement("dataclasses_json"),
+        requirement("numpy"),
+        requirement("pillow"),
+    ],
+)
+
+py_library(
+    name = "pylib_stores",
+    srcs = [
+        "stores.py",
+    ],
+    deps = [
+        requirement("cbor2"),
+        requirement("universal_pathlib"),
+        requirement("zarr"),
+    ],
+)
+
+py_library(
+    name = "pylib_util",
+    srcs = [
+        "util.py",
+    ],
+    deps = [
+        requirement("dataclasses_json"),
+        requirement("numpy"),
+        requirement("universal_pathlib"),
+    ],
+)
+
+py_library(
+    name = "pylib_compat",
+    srcs = [
+        "compat.py",
+    ],
+    deps = [
+        ":pylib_types",
+        ":pylib_util",
+        "//ncore/impl/common:pylib_transformations",
+        requirement("numpy"),
+        requirement("pillow"),
+        requirement("typing_extensions"),
+        requirement("universal_pathlib"),
+    ],
+)
+
+pytest_test(
+    name = "pytest_util",
+    srcs = [
+        "util_test.py",
+    ],
+    deps = [
+        ":pylib_util",
+    ],
+)
+
+pytest_test(
+    name = "pytest_stores",
+    srcs = ["stores_test.py"],
+    deps = [
+        ":pylib_stores",
+        requirement("numpy"),
+        requirement("parameterized"),
+        requirement("zarr"),
+    ],
+)

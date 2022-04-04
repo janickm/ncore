@@ -1,0 +1,70 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+# http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+load("@rules_multirun//:defs.bzl", "multirun")
+load("@rules_uv//uv:pip.bzl", "pip_compile")
+
+# Export lock files for use as constraints by other modules
+exports_files([
+    "requirements_3_11.txt",
+    "requirements_3_8.txt",
+])
+
+# Check that our compiled pip requirements are up-to-date
+PIP_COMPILE_ARGS = [
+    "--generate-hashes",
+    "--emit-index-url",
+    "--emit-find-links",
+]
+
+pip_compile(
+    name = "requirements_3_11",
+    size = "medium",
+    args = PIP_COMPILE_ARGS,
+    data = [
+        ":requirements_docs.in",
+        ":requirements_ncore.in",
+        ":requirements_tests.in",
+        ":requirements_tools.in",
+        ":requirements_typing.in",
+        ":requirements_waymo.in",
+    ],
+    py3_runtime = "@python_3_11//:py3_runtime",
+    requirements_in = "requirements_3_11.in",
+    requirements_txt = "requirements_3_11.txt",
+)
+
+pip_compile(
+    name = "requirements_3_8",
+    size = "medium",
+    args = PIP_COMPILE_ARGS,
+    data = [
+        ":requirements_ncore.in",
+        ":requirements_tests.in",
+    ],
+    py3_runtime = "@python_3_8//:py3_runtime",
+    requirements_in = "requirements_3_8.in",
+    requirements_txt = "requirements_3_8.txt",
+)
+
+# Single command to update all requirements files (no order dependency)
+multirun(
+    name = "update_all_requirements",
+    commands = [
+        ":requirements_3_11",
+        ":requirements_3_8",
+    ],
+    keep_going = False,  # Fail on error
+)

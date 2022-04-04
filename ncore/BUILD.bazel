@@ -1,0 +1,74 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+# http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+load("@rules_python//python:defs.bzl", "py_library")
+load("@rules_python//python:packaging.bzl", "py_package", "py_wheel")
+
+# Proxy library to include PEP 561 type-marker
+py_library(
+    name = "pylib",
+    data = ["py.typed"],
+    visibility = ["//visibility:public"],
+    deps = [
+        "@ncore_repo//ncore/data:pylib",
+        "@ncore_repo//ncore/data/v4:pylib",
+        "@ncore_repo//ncore/data_converter:pylib",
+        "@ncore_repo//ncore/sensors:pylib",
+    ],
+)
+
+# Collect all dependencies within the ncore.* subpackages to export in wheel
+py_package(
+    name = "ncore_pkg",
+    packages = ["ncore"],
+    deps = [
+        "@ncore_repo//ncore:pylib",
+    ],
+)
+
+# Export packages by creating wheel
+py_wheel(
+    name = "ncore_wheel",
+    abi = "none",
+    author = "NVIDIA Corporation",
+    description_file = "PYPI_README.md",
+    distribution = "nvidia-ncore",
+    homepage = "https://github.com/NVIDIA/ncore",
+    license = "Apache-2.0",
+    platform = "any",
+    python_requires = ">=3.8",
+    python_tag = "py3",
+    requires = [
+        "numpy",
+        # dataclasses_json version restriction rationale: deserialization fails with earlier versions
+        "dataclasses_json>=0.2.12",
+        "pillow",
+        # zarr version restrictions / suggestions rationale:
+        # - 2.17.0 contains crucial perf improvements ["Cache result of FSStore._fsspec_installed()" https://github.com/zarr-developers/zarr-python/pull/1581]
+        # - 2.12.0 is the last version supporting python3.8 with old numpy versions, which we still want to support for now
+        # - we can't switch to zarr 3 yet unconditionally as it's not available for python3.8 anymore
+        "zarr>=2.12.0,<3.0.0",
+        "cbor2",
+        "scipy",
+        "torch",
+        "typing_extensions",
+        "universal_pathlib",
+    ],
+    summary = "A unified data format and library for AV / robotics",
+    version = "18.5.0",
+    deps = [
+        ":ncore_pkg",
+    ],
+)
