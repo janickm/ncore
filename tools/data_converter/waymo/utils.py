@@ -16,6 +16,9 @@
 #
 # Modifications Copyright 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 
+import zlib
+
+from dataclasses import dataclass
 from typing import Optional
 
 import numpy as np
@@ -23,6 +26,129 @@ import numpy as np
 from scipy.linalg import expm
 
 from tools.data_converter.waymo.deps import dataset_pb2, tf
+
+
+def _decode_varint(buf: bytes, pos: int) -> tuple[int, int]:
+    """Decode a protobuf varint starting at `pos`, returning (value, new_pos)."""
+    result = 0
+    shift = 0
+    while True:
+        b = buf[pos]
+        pos += 1
+        result |= (b & 0x7F) << shift
+        if (b & 0x80) == 0:
+            return result, pos
+        shift += 7
+
+
+@dataclass
+class _ParsedMatrix:
+    """Lightweight container holding the result of fast-path protobuf matrix parsing."""
+
+    data: np.ndarray
+    dims: list[int]
+
+
+def _decode_zigzag(n: int) -> int:
+    """Decode a ZigZag-encoded signed integer (used by protobuf sint32/sint64)."""
+    return (n >> 1) ^ -(n & 1)
+
+
+def _parse_packed_varints_int32(buf: bytes, start: int, end: int) -> list[int]:
+    """Decode a sequence of packed varint-encoded int32 values.
+
+    Protobuf encodes negative int32 as 10-byte sign-extended 64-bit varints,
+    so we must mask to 32 bits and reinterpret as signed.
+    """
+    values: list[int] = []
+    pos = start
+    while pos < end:
+        val, pos = _decode_varint(buf, pos)
+        val = val & 0xFFFFFFFF
+        if val > 0x7FFFFFFF:
+            val -= 0x100000000
+        values.append(val)
+    return values
+
+
+def _parse_matrix_proto(raw_compressed: bytes, dtype: type) -> _ParsedMatrix:
+    """Fast-path parser for Waymo's MatrixFloat / MatrixInt32 protos.
+
+    Parses the protobuf wire format directly to locate the packed data field
+    and extracts it via np.frombuffer (for floats) or varint decoding (for int32),
+    avoiding the slow Python protobuf repeated-field construction that dominates
+    the cost of ParseFromString for large matrices (~1M+ elements).
+
+    Wire layout (from waymo_open_dataset/dataset.proto):
+      MatrixFloat { repeated float data = 1 [packed=true]; optional MatrixShape shape = 2; }
+      MatrixInt32 { repeated int32 data = 1 [packed=true]; optional MatrixShape shape = 2; }
+      MatrixShape { repeated int32 dims = 1; }
+
+    Note: packed float fields are raw IEEE 754 bytes (4 bytes each), while packed
+    int32 fields use varint encoding (variable-length per element).
+    """
+    buf = zlib.decompress(raw_compressed)
+    pos = 0
+    end = len(buf)
+    data_start: Optional[int] = None
+    data_end: Optional[int] = None
+    dims: list[int] = []
+    is_float = dtype == np.float32 or dtype == np.float64
+
+    while pos < end:
+        tag, pos = _decode_varint(buf, pos)
+        field_number = tag >> 3
+        wire_type = tag & 0x07
+
+        if wire_type == 2:  # length-delimited
+            length, pos = _decode_varint(buf, pos)
+            if field_number == 1:  # data (packed floats or varints)
+                data_start = pos
+                data_end = pos + length
+            elif field_number == 2:  # shape sub-message
+                sub_end = pos + length
+                while pos < sub_end:
+                    sub_tag, pos = _decode_varint(buf, pos)
+                    sub_field = sub_tag >> 3
+                    sub_wire = sub_tag & 0x07
+                    if sub_field == 1 and sub_wire == 0:
+                        val, pos = _decode_varint(buf, pos)
+                        dims.append(val)
+                    elif sub_field == 1 and sub_wire == 2:
+                        sub_len, pos = _decode_varint(buf, pos)
+                        sub_data_end = pos + sub_len
+                        while pos < sub_data_end:
+                            val, pos = _decode_varint(buf, pos)
+                            dims.append(val)
+                    else:
+                        if sub_wire == 0:
+                            _, pos = _decode_varint(buf, pos)
+                        elif sub_wire == 2:
+                            sl, pos = _decode_varint(buf, pos)
+                            pos += sl
+                        else:
+                            raise ValueError(f"Unexpected sub wire type {sub_wire}")
+                continue  # pos already advanced past sub-message
+            pos += length
+        elif wire_type == 0:  # varint
+            _, pos = _decode_varint(buf, pos)
+        elif wire_type == 5:  # 32-bit
+            pos += 4
+        elif wire_type == 1:  # 64-bit
+            pos += 8
+        else:
+            raise ValueError(f"Unexpected wire type {wire_type}")
+
+    if data_start is None or data_end is None:
+        return _ParsedMatrix(data=np.empty(0, dtype=dtype), dims=dims)
+
+    data: np.ndarray
+    if is_float:
+        data = np.frombuffer(memoryview(buf)[data_start:data_end], dtype=dtype)
+    else:
+        data = np.array(_parse_packed_varints_int32(buf, data_start, data_end), dtype=dtype)
+
+    return _ParsedMatrix(data=data, dims=dims)
 
 
 ## Functions are adapted from the official waymo open github page
@@ -50,140 +176,90 @@ def get_skew_symmetric(vec: np.ndarray) -> np.ndarray:
 
 
 ### From here on the function are adopted from the waymo utils
-def parse_range_image_and_segmentations(frame, laser_name, ri_index: int = 0):
+def parse_range_image_and_segmentations(frame, laser_name, ri_index: int = 0, range_image_top_pose=None):
     """Parse range images and segmentations given a frame.
 
     Args:
        frame: open dataset frame proto
        laser_name: the name of the laser sensor to process
        ri_index: 0 for the first return, 1 for the second return.
+       range_image_top_pose: optional pre-parsed top-lidar pose to avoid redundant decompression.
 
     Returns:
-       range_image: range_image_for_return.
-       segmentations: Optional segmentations_for_return.
-       range_image_top_pose: range image pixel pose for top lidar
+       range_image: parsed range image matrix.
+       segmentations: Optional parsed segmentation matrix.
+       range_image_top_pose: parsed top-lidar per-pixel pose matrix.
     """
 
-    range_image = dataset_pb2.MatrixFloat()
-    segmentation: Optional[dataset_pb2.MatrixInt32] = None
-    range_image_top_pose = dataset_pb2.MatrixFloat()
+    range_image: Optional[_ParsedMatrix] = None
+    segmentation: Optional[_ParsedMatrix] = None
+    need_top_pose = range_image_top_pose is None
 
     for laser in frame.lasers:
         laser_ri_return = laser.ri_return1 if ri_index == 0 else laser.ri_return2
 
-        if laser.name == dataset_pb2.LaserName.TOP:
-            range_image_top_pose_str_tensor = tf.io.decode_compressed(
-                laser_ri_return.range_image_pose_compressed, "ZLIB"
-            )
-            range_image_top_pose.ParseFromString(bytearray(range_image_top_pose_str_tensor.numpy()))
+        if need_top_pose and laser.name == dataset_pb2.LaserName.TOP:
+            range_image_top_pose = _parse_matrix_proto(laser_ri_return.range_image_pose_compressed, np.float32)
 
         if laser.name != laser_name:
             continue
 
         if len(laser_ri_return.range_image_compressed) > 0:  # pylint: disable=g-explicit-length-test
-            range_image_str_tensor = tf.io.decode_compressed(laser_ri_return.range_image_compressed, "ZLIB")
-            range_image.ParseFromString(bytearray(range_image_str_tensor.numpy()))
+            range_image = _parse_matrix_proto(laser_ri_return.range_image_compressed, np.float32)
 
         if len(laser_ri_return.segmentation_label_compressed) > 0:
-            segmentations_str_tensor = tf.io.decode_compressed(laser_ri_return.segmentation_label_compressed, "ZLIB")
-            segmentation = dataset_pb2.MatrixInt32()
-            segmentation.ParseFromString(bytearray(segmentations_str_tensor.numpy()))
+            segmentation = _parse_matrix_proto(laser_ri_return.segmentation_label_compressed, np.int32)
 
     return range_image, segmentation, range_image_top_pose
 
 
-def convert_range_image_to_point_cloud(
+@dataclass
+class _PointCloudReturn:
+    """Result of converting a single range image return to a point cloud."""
+
+    points: np.ndarray
+    segmentation: Optional[np.ndarray]
+    timestamps: np.ndarray
+    range_image_indices: np.ndarray
+    inclinations: np.ndarray
+    azimuths: np.ndarray
+
+
+def convert_range_images_to_point_clouds(
     frame,
     laser_name: str,
-    range_image,
-    segmentation,
-    range_image_top_pose,
+    range_images: list[_ParsedMatrix],
+    segmentation: Optional[_ParsedMatrix],
+    range_image_top_pose: _ParsedMatrix,
     start_end_timestamps,
-):
-    """Convert range images to point cloud.
+) -> list[_PointCloudReturn]:
+    """Convert one or more range image returns to point clouds in a single batched pass.
+
+    Batches all returns along the B dimension so that the expensive TF operations
+    (polar coordinate computation, extrinsic/pixel-pose transforms) run only once.
+    The per-return mask and gather are applied afterwards since each return has
+    different valid pixels.
 
     Args:
       frame: open dataset frame.
       laser_name: the name of the laser sensor to process.
-      range_image: range_image return.
-      segmentation: segmentation return.
-      range_image_top_pose: range image pixel pose for top lidar.
+      range_images: list of parsed range image matrices (one per return).
+      segmentation: optional segmentation for the first return (None for others).
+      range_image_top_pose: parsed top-lidar per-pixel pose matrix.
       start_end_timestamps: timestamp bounds to approximate point timestamps from.
 
     Returns:
-      points: [N, 8] list of 3d lidar points of length 8, floats (signals: start-ray-point, end-ray-point, intensity, elongation).
-      segs: [N, 2] list of point instance-IDs / semantic_classes (if available)
-      timestamps: [N] list of point timestamps, unsigned-integers
-      range_image_indices: [N, 2] per-point indices in the original range-image
-      inclinations: [H] per-row ray inclinations [rad]
-      azimuths: [W] per-column ray azimuths [rad]
-
+      List of _PointCloudReturn, one per input range image.
     """
-    cartesian_range_image, timestamps_full, inclinations, azimuths = convert_range_image_to_cartesian(
-        frame, laser_name, range_image, range_image_top_pose, start_end_timestamps
-    )
-
-    points: np.ndarray = np.empty(0)
-    segs: Optional[np.ndarray] = None
-    timestamps: np.ndarray = np.empty(0)
-    range_image_indices: np.ndarray = np.empty(0)
-
-    for c in frame.context.laser_calibrations:
-        if c.name != laser_name:
-            continue
-
-        range_image_tensor = tf.reshape(tf.convert_to_tensor(value=range_image.data), range_image.shape.dims)
-        range_image_mask = range_image_tensor[..., 0] > 0  # filter points based on positive range
-
-        range_image_indices_tensor = tf.compat.v1.where(range_image_mask)
-
-        points_tensor = tf.gather_nd(cartesian_range_image, range_image_indices_tensor)
-        points = points_tensor.numpy()
-
-        if segmentation:
-            seq_tensor = tf.reshape(tf.convert_to_tensor(value=segmentation.data), segmentation.shape.dims)
-            seg_points_tensor = tf.gather_nd(seq_tensor, range_image_indices_tensor)
-            segs = seg_points_tensor.numpy()
-
-        timestamps_tensor = tf.gather_nd(timestamps_full, range_image_indices_tensor)
-        timestamps = timestamps_tensor.numpy()
-
-        range_image_indices = range_image_indices_tensor.numpy().astype(np.uint32)
-
-    return (
-        points,
-        segs,
-        timestamps,
-        range_image_indices,
-        inclinations.numpy().astype(np.float32),
-        azimuths.numpy().astype(np.float32),
-    )
-
-
-def convert_range_image_to_cartesian(frame, laser_name, range_image, range_image_top_pose, start_end_timestamps):
-    """Convert range images from polar coordinates to Cartesian coordinates.
-
-    Args:
-      frame: open dataset frame.
-      laser_name: the name of the laser sensor to process.
-      range_image: range_image_return.
-      range_image_top_pose: range image pixel pose for top lidar.
-      start_end_timestamps: timestamp bounds to approximate point timestamps from.
-
-    Returns:
-      (H, W, 8) range images in Cartesian coordinates. (signals: start-ray-point, end-ray-point, intensity, elongation).
-    """
-    cartesian_range_images = None
-    timestamps = None
+    n_returns = len(range_images)
 
     frame_pose = tf.convert_to_tensor(value=np.reshape(np.array(frame.pose.transform), [4, 4]))
 
-    # [H, W, 6]
+    # Build top-pose [H, W, 4, 4] tensor
     range_image_top_pose_tensor = tf.reshape(
         tf.convert_to_tensor(value=range_image_top_pose.data),
-        range_image_top_pose.shape.dims,
+        range_image_top_pose.dims,
     )
-    # [H, W, 3, 3]
     range_image_top_pose_tensor_rotation = get_rotation_matrix(
         range_image_top_pose_tensor[..., 0],
         range_image_top_pose_tensor[..., 1],
@@ -194,6 +270,8 @@ def convert_range_image_to_cartesian(frame, laser_name, range_image, range_image
         range_image_top_pose_tensor_rotation, range_image_top_pose_tensor_translation
     )
 
+    results: list[_PointCloudReturn] = []
+
     for c in frame.context.laser_calibrations:
         if c.name != laser_name:
             continue
@@ -201,7 +279,7 @@ def convert_range_image_to_cartesian(frame, laser_name, range_image, range_image
         if len(c.beam_inclinations) == 0:  # pylint: disable=g-explicit-length-test
             beam_inclinations = compute_inclination(
                 tf.constant([c.beam_inclination_min, c.beam_inclination_max]),
-                height=range_image.shape.dims[0],
+                height=range_images[0].dims[0],
             )
         else:
             beam_inclinations = tf.constant(c.beam_inclinations)
@@ -209,43 +287,85 @@ def convert_range_image_to_cartesian(frame, laser_name, range_image, range_image
         beam_inclinations = tf.reverse(beam_inclinations, axis=[-1])
         extrinsic = np.reshape(np.array(c.extrinsic.transform), [4, 4])
 
-        range_image_tensor = tf.reshape(tf.convert_to_tensor(value=range_image.data), range_image.shape.dims)
-        pixel_pose_local = None
-        frame_pose_local = None
-        if c.name == dataset_pb2.LaserName.TOP:
-            pixel_pose_local = range_image_top_pose_tensor
-            pixel_pose_local = tf.expand_dims(pixel_pose_local, axis=0)
-            frame_pose_local = tf.expand_dims(frame_pose, axis=0)
+        # Stack all returns along B dimension: [n_returns, H, W, C]
+        ri_tensors = [tf.reshape(tf.convert_to_tensor(value=ri.data), ri.dims) for ri in range_images]
+        # Range channel only: [n_returns, H, W]
+        range_batch = tf.stack([t[..., 0] for t in ri_tensors], axis=0)
 
-        range_image_cartesian, range_image_timestamps, azimuths = extract_point_cloud_from_range_image(
-            tf.expand_dims(range_image_tensor[..., 0], axis=0),
-            tf.expand_dims(extrinsic, axis=0),
+        # Tile shared parameters to match batch size
+        extrinsic_batch = tf.tile(tf.expand_dims(extrinsic, axis=0), [n_returns, 1, 1])
+        inclination_batch = tf.tile(
             tf.expand_dims(tf.convert_to_tensor(value=beam_inclinations), axis=0),
+            [n_returns, 1],
+        )
+
+        pixel_pose_batch = None
+        frame_pose_batch = None
+        if c.name == dataset_pb2.LaserName.TOP:
+            pixel_pose_batch = tf.tile(
+                tf.expand_dims(range_image_top_pose_tensor, axis=0),
+                [n_returns, 1, 1, 1, 1],
+            )
+            frame_pose_batch = tf.tile(
+                tf.expand_dims(frame_pose, axis=0),
+                [n_returns, 1, 1],
+            )
+
+        # Single batched call for all returns
+        range_image_cartesian, range_image_timestamps, azimuths = extract_point_cloud_from_range_image(
+            range_batch,
+            extrinsic_batch,
+            inclination_batch,
             start_end_timestamps,
-            pixel_pose=pixel_pose_local,
-            frame_pose=frame_pose_local,
+            pixel_pose=pixel_pose_batch,
+            frame_pose=frame_pose_batch,
         )
 
-        intensity = range_image_tensor[..., 1]
-        elongation = range_image_tensor[..., 2]
+        # Timestamps and azimuths are geometry-only (independent of range values),
+        # so they're identical across returns -- use the first batch element.
+        timestamps_full = range_image_timestamps[0]  # [H, W]
+        azimuths_np = azimuths[0].numpy().astype(np.float32)
+        inclinations_np = beam_inclinations.numpy().astype(np.float32)
 
-        end_point_cartesian = tf.squeeze(range_image_cartesian[0], axis=0)
-        source_point_cartesian = tf.squeeze(range_image_cartesian[1], axis=0)
+        for ri_idx in range(n_returns):
+            end_point_cartesian = range_image_cartesian[0][ri_idx]  # [H, W, 3]
+            source_point_cartesian = range_image_cartesian[1][ri_idx]  # [H, W, 3]
 
-        cartesian_range_images = tf.concat(
-            [
-                source_point_cartesian,
-                end_point_cartesian,
-                intensity[:, :, None],
-                elongation[:, :, None],
-            ],
-            axis=-1,
-        )
+            cartesian_full = tf.concat(
+                [
+                    source_point_cartesian,
+                    end_point_cartesian,
+                    ri_tensors[ri_idx][..., 1:2],  # intensity
+                    ri_tensors[ri_idx][..., 2:3],  # elongation
+                ],
+                axis=-1,
+            )  # [H, W, 8]
 
-        timestamps = tf.squeeze(range_image_timestamps, axis=0)
-        azimuths = tf.squeeze(azimuths, axis=0)
+            range_image_mask = ri_tensors[ri_idx][..., 0] > 0
+            range_image_indices_tensor = tf.compat.v1.where(range_image_mask)
 
-    return cartesian_range_images, timestamps, beam_inclinations, azimuths
+            points = tf.gather_nd(cartesian_full, range_image_indices_tensor).numpy()
+
+            seg_result = None
+            if ri_idx == 0 and segmentation is not None:
+                seq_tensor = tf.reshape(tf.convert_to_tensor(value=segmentation.data), segmentation.dims)
+                seg_result = tf.gather_nd(seq_tensor, range_image_indices_tensor).numpy()
+
+            ts = tf.gather_nd(timestamps_full, range_image_indices_tensor).numpy()
+            ri_indices = range_image_indices_tensor.numpy().astype(np.uint32)
+
+            results.append(
+                _PointCloudReturn(
+                    points=points,
+                    segmentation=seg_result,
+                    timestamps=ts,
+                    range_image_indices=ri_indices,
+                    inclinations=inclinations_np,
+                    azimuths=azimuths_np,
+                )
+            )
+
+    return results
 
 
 def extract_point_cloud_from_range_image(

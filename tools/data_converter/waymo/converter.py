@@ -64,7 +64,7 @@ from ncore.impl.sensors.lidar import RowOffsetStructuredSpinningLidarModel
 from tools.data_converter.cli import cli
 from tools.data_converter.waymo.deps import camera_segmentation_pb2, dataset_pb2, label_pb2, tf
 from tools.data_converter.waymo.utils import (
-    convert_range_image_to_point_cloud,
+    convert_range_images_to_point_clouds,
     extrapolate_pose_based_on_velocity,
     parse_range_image_and_segmentations,
 )
@@ -465,41 +465,28 @@ class WaymoConverter4(BaseDataConverter):
                     frame, lidar_id, ri_index=0
                 )
 
-                range_image_second, _, _ = parse_range_image_and_segmentations(frame, lidar_id, ri_index=1)
+                range_image_second, _, _ = parse_range_image_and_segmentations(
+                    frame, lidar_id, ri_index=1, range_image_top_pose=range_image_top_pose
+                )
 
-                # Convert the range image to a ego-motion compensated 3D rays in sequence world coordinate frame
-                # (motion-compensated to start frame time)
-                (
-                    points_world,
-                    segmentation,
-                    point_timestamps_us,
-                    range_image_indices,  # N x 2
-                    inclinations_rad,
-                    azimuths_rad,
-                ) = convert_range_image_to_point_cloud(
+                # Convert both range image returns to point clouds in a single batched pass
+                pc_first, pc_second = convert_range_images_to_point_clouds(
                     frame,
                     lidar_id,
-                    range_image,
+                    [range_image, range_image_second],
                     segmentation,
                     range_image_top_pose,
                     timestamps_us,
                 )
+                points_world = pc_first.points
+                segmentation = pc_first.segmentation
+                point_timestamps_us = pc_first.timestamps
+                range_image_indices = pc_first.range_image_indices
+                inclinations_rad = pc_first.inclinations
+                azimuths_rad = pc_first.azimuths
 
-                (
-                    points_world_second,
-                    _,
-                    _,
-                    range_image_indices_second,
-                    _,
-                    _,
-                ) = convert_range_image_to_point_cloud(
-                    frame,
-                    lidar_id,
-                    range_image_second,
-                    None,
-                    range_image_top_pose,
-                    timestamps_us,
-                )
+                points_world_second = pc_second.points
+                range_image_indices_second = pc_second.range_image_indices
 
                 del (range_image, range_image_second, range_image_top_pose)
 
@@ -511,7 +498,10 @@ class WaymoConverter4(BaseDataConverter):
                     range_image_indices_second[:, 0] + range_image_indices_second[:, 1] * range_image_width
                 )
 
-                primary_indices = np.where(linear_indices_second[:, None] == linear_indices_primary[None, :])[1]  # S
+                # Build a hash map from primary linear index -> position for O(N+S) matching
+                primary_index_map = np.empty(linear_indices_primary.max() + 1, dtype=np.intp)
+                primary_index_map[linear_indices_primary] = np.arange(len(linear_indices_primary))
+                primary_indices = primary_index_map[linear_indices_second]  # S
 
                 # Pick semantic_class if available in current frame
                 semantic_class = segmentation[:, 1].astype(np.int8) if (segmentation is not None) else None  # N
@@ -588,9 +578,9 @@ class WaymoConverter4(BaseDataConverter):
                 elongation[1, primary_indices] = points_world_second[:, 7]  # S
 
                 # Process frame labels (defined in frame-associated rig frame)
-                T_rig_labelstime_world = np.array(
-                    tf.reshape(tf.constant(frame.pose.transform, dtype=tf.float64), [4, 4])
-                ).astype(np.float32)
+                T_rig_labelstime_world = (
+                    np.array(frame.pose.transform, dtype=np.float64).reshape(4, 4).astype(np.float32)
+                )
                 T_rig_labelstime_sensor_end = T_world_sensor_end @ T_rig_labelstime_world
 
                 # Initialize intrinsics and associated lookup tables
