@@ -26,6 +26,12 @@ build --incompatible_allow_tags_propagation
 # Check the ctime of input files of an action before uploading it to a remote cache (there may be cases where the Linux kernel delays writing of files, which could cause false positives)
 build --guard_against_concurrent_changes
 
+# Wheel version stamping: The py_wheel rule uses {BUILD_EMBED_LABEL} as its version.
+# This default ensures local builds produce a valid (but clearly non-release) version.
+# CI overrides this with the actual version:
+#   bazelisk run --stamp --embed_label=18.6.0 //ncore:ncore_wheel.publish
+build --embed_label=0.0.0.dev0
+
 # Show outputs of failing tests by default
 test --test_output=errors
 

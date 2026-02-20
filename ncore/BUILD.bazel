@@ -14,7 +14,7 @@
 # limitations under the License.
 
 load("@rules_python//python:defs.bzl", "py_library")
-load("@rules_python//python:packaging.bzl", "py_package", "py_wheel")
+load("@rules_python//python:packaging.bzl", "py_package", "py_wheel", "py_wheel_dist")
 
 # Proxy library to include PEP 561 type-marker
 py_library(
@@ -66,9 +66,32 @@ py_wheel(
         "typing_extensions",
         "universal_pathlib",
     ],
+    # Version is injected at build time via Bazel's --embed_label flag.
+    # The {BUILD_EMBED_LABEL} placeholder is resolved from --embed_label when
+    # --stamp is enabled. A default of 0.0.0.dev0 is set in .bazelrc for local builds
+    # (see below).
+    #
+    # Examples:
+    #   bazelisk run --stamp --embed_label=v18.6.0 //ncore:ncore_wheel.publish  # publish a release of 18.6.0
+    stamp = 1,
     summary = "A unified data format and library for AV / robotics",
-    version = "18.5.0",
+    version = "{BUILD_EMBED_LABEL}",
     deps = [
         ":ncore_pkg",
     ],
+)
+
+# Produces a dist/ directory containing the wheel with the stamped version in
+# its filename (e.g., bazel-bin/ncore/ncore_wheel_dist/nvidia_ncore-18.6.0-py3-none-any.whl).
+# The base py_wheel target cannot include stamp info in its output filename because Bazel requires
+# deterministic names at analysis time. Use this target when you need the
+# correctly-named wheel file, e.g., for uploading as a GitHub Release artifact.
+#
+# Example:
+#   bazelisk build //ncore:ncore_wheel_dist                                # → 0.0.0.dev0 (default)
+#   bazelisk build --stamp --embed_label=v18.6.0 //ncore:ncore_wheel_dist  # → 18.6.0
+py_wheel_dist(
+    name = "ncore_wheel_dist",
+    out = "dist",
+    wheel = ":ncore_wheel",
 )

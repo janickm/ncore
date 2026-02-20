@@ -174,6 +174,55 @@ PRs are merged via **rebase only** (no merge commits).
 
 Before submitting your PR, ensure your branch is *rebased* on the latest `main` and is free of merge commits.
 
+## Releases & Versioning
+
+NCore uses [Semantic Versioning](https://semver.org/) with versions determined automatically from [Conventional Commits](https://www.conventionalcommits.org/) via [cocogitto](https://docs.cocogitto.io/).
+
+### Version Source of Truth
+
+The package version is **not hardcoded** in any source file. Instead, it is injected at build time via Bazel's `--embed_label` flag:
+
+```bash
+# Local development (uses default 0.0.0.dev0 from .bazelrc):
+bazelisk build //ncore:ncore_wheel
+
+# Explicit version:
+bazelisk build --embed_label=18.6.0 //ncore:ncore_wheel
+
+# Build + publish (CI):
+bazelisk run --stamp --embed_label=18.6.0 //ncore:ncore_wheel.publish
+```
+
+Git tags (e.g., `v18.5.0`) are the single source of truth for released versions.
+
+### Release Process
+
+Releases are managed by GitHub Actions workflows:
+
+1. An admin triggers the **Prepare Release** workflow (`release.yml`) via `workflow_dispatch`
+2. The workflow computes the next version from conventional commits since the last tag
+3. A release PR is created with an updated `CHANGELOG.md`
+4. The admin reviews and merges the PR
+5. CI detects the release commit, creates a git tag, publishes the wheel, and creates a GitHub Release
+
+### Dev Builds
+
+On-demand development builds can be created via the **Dev Build** workflow (`dev-build.yml`):
+
+1. An admin triggers the workflow via `workflow_dispatch`
+2. The version is computed from `git describe` (e.g., `18.5.0.dev7` for 7 commits after `v18.5.0`)
+3. The wheel is published to Test PyPI with the dev version
+
+### Cocogitto Configuration
+
+Cocogitto is configured via `.cog.toml` in the repository root. All `cog` commands must reference this config:
+
+```bash
+cog --config .cog.toml check                  # Validate commit messages
+cog --config .cog.toml bump --auto --dry-run   # Preview next version
+cog --config .cog.toml changelog               # Generate changelog
+```
+
 ## Commit Signatures
 
 We require that all commits are GPG-signed. This ensures commit authenticity and certifies your agreement with the Developer Certificate of Origin (DCO) below.
