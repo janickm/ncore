@@ -14,7 +14,9 @@
 # limitations under the License.
 
 load("@ncore_pip_deps//:requirements.bzl", "requirement")
+load("@rules_oci//oci:defs.bzl", "oci_load", "oci_push")
 load("@rules_python//python:defs.bzl", "py_binary")
+load("//bazel/oci:py_layer.bzl", "py_oci_image")
 
 # targets might be used in various places also outside of the repo, so make it public
 package(default_visibility = ["//visibility:public"])
@@ -49,4 +51,39 @@ py_binary(
 alias(
     name = "pai",
     actual = ":convert",
+)
+
+# OCI image for the PAI converter
+# We need to gzip layers unconditionally as maglev only supports gzipped layers.
+py_oci_image(
+    name = "pai_convert_image",
+    base = "@ncore_internal_dev_image",
+    binary = "convert",
+    compress = "gzip",
+    entrypoint = ["/tools/data_converter/pai/convert"],
+    tags = [
+        "manual",
+        "no-remote-cache",
+    ],
+)
+
+oci_load(
+    name = "load_pai_convert_image",
+    image = ":pai_convert_image",
+    repo_tags = ["nvcr.io/nv-maglev/dlav/ncore-convert-pai:latest"],
+    tags = [
+        "manual",
+        "no-remote-cache",
+    ],
+)
+
+oci_push(
+    name = "push_pai_convert_image_stage",
+    image = ":pai_convert_image",
+    remote_tags = ["stage"],
+    repository = "nvcr.io/nv-maglev/dlav/ncore-convert-pai",
+    tags = [
+        "manual",
+        "no-remote-cache",
+    ],
 )

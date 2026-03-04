@@ -31,7 +31,9 @@ bazel_dep(name = "rules_license", version = "1.0.0")
 bazel_dep(name = "buildifier_prebuilt", version = "8.2.1")
 bazel_dep(name = "bazel_skylib", version = "1.7.1")
 bazel_dep(name = "rules_proto", version = "7.1.0")
+bazel_dep(name = "aspect_bazel_lib", version = "2.13.0")
 bazel_dep(name = "platforms", version = "1.0.0")
+bazel_dep(name = "rules_pkg", version = "1.1.0")
 
 ## rules_python
 bazel_dep(name = "rules_python", version = "1.2.0")
@@ -70,6 +72,23 @@ pip.parse(
     requirements_lock = "//deps/pip:requirements_3_8.txt",
 )
 use_repo(pip, "ncore_pip_deps")
+
+## rules_oci
+bazel_dep(name = "rules_oci", version = "2.2.0")
+single_version_override(
+    module_name = "rules_oci",
+    patch_strip = 1,
+    patches = ["@@//:deps/oci/oci.patch"],
+    version = "2.2.0",
+)
+
+oci = use_extension("@rules_oci//oci:extensions.bzl", "oci")
+oci.pull(
+    name = "ncore_internal_dev_image",
+    digest = "sha256:e9b9029a1f2a6825fc0a3f9c8571c6ebc3c2082e7ab7229a543cdc3abb304d22",
+    image = "gitlab-master.nvidia.com:5005/nrs/ncore-internal",
+)
+use_repo(oci, "ncore_internal_dev_image")
 
 ## rules_multitool (for ruff formatter)
 bazel_dep(name = "rules_multitool", version = "1.0.0")
