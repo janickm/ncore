@@ -17,3 +17,8 @@ bazel-*
 *.swo
 
 MODULE.bazel.lock
+
+# Nix dev shell (local-only, not committed to shared repo)
+shell.nix
+.envrc
+.direnv/
