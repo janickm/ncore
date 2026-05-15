@@ -30,6 +30,22 @@ py_library(
     ],
 )
 
+pytest_test(
+    name = "pytest_rolling_shutter",
+    srcs = [
+        "rolling_shutter_test.py",
+    ],
+    deps = [
+        ":pylib_camera",
+        ":pylib_common",
+        "//ncore/impl/data:pylib_types",
+        requirement("numpy"),
+        requirement("parameterized"),
+        requirement("scipy"),
+        requirement("torch"),
+    ],
+)
+
 py_library(
     name = "pylib_camera",
     srcs = [
