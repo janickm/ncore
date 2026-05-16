@@ -1,0 +1,344 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+# http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+# Automated release workflow.
+#
+# Creates a new release by running cocogitto to compute the next version from
+# conventional commits, updating CHANGELOG.md, pushing the bump commit and tag
+# to main, and creating a GitHub Release. PyPI publishing is handled by the
+# existing CI workflow (publish-pypi job) which triggers on every main push.
+#
+# Usage:
+#   gh workflow run release.yml -f bump=auto
+#   gh workflow run release.yml -f bump=minor -f highlights='- New feature X'
+#   gh workflow run release.yml -f version=19.2.0   # resume a failed release
+#
+# Prerequisites:
+#   - Branch protection: github-actions[bot] must be in the bypass list for main
+#   - Secrets: GITHUB_TOKEN (automatic) is sufficient for all operations
+#
+# See CONTRIBUTING.md for the full release process documentation.
+
+name: Release
+
+on:
+  workflow_dispatch:
+    inputs:
+      bump:
+        description: 'Version bump type (auto determines from conventional commits)'
+        default: 'auto'
+        type: choice
+        options:
+          - auto
+          - major
+          - minor
+          - patch
+      highlights:
+        description: 'Release highlights in markdown (optional, inserted into CHANGELOG.md)'
+        type: string
+        default: ''
+      version:
+        description: 'Resume a failed release for this version (skips cog bump)'
+        type: string
+        default: ''
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+
+    steps:
+      # =====================================================================
+      # Gate: verify main CI is green
+      # =====================================================================
+      - name: Verify main CI is green
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          echo "Checking CI status on main..."
+          MAIN_SHA=$(gh api repos/${{ github.repository }}/commits/main --jq '.sha')
+          echo "Latest main commit: $MAIN_SHA"
+
+          # Get all check runs for the latest main commit
+          CHECKS_JSON=$(gh api "repos/${{ github.repository }}/commits/${MAIN_SHA}/check-runs" \
+            --paginate --jq '.check_runs')
+
+          # Filter to completed checks (ignore this workflow's own run)
+          FAILED=$(echo "$CHECKS_JSON" | jq -r '
+            [.[] | select(
+              .status == "completed" and
+              .conclusion != "success" and
+              .conclusion != "skipped" and
+              .conclusion != "neutral" and
+              (.name | test("release"; "i") | not)
+            )] | length
+          ')
+          PENDING=$(echo "$CHECKS_JSON" | jq -r '
+            [.[] | select(
+              .status != "completed" and
+              (.name | test("release"; "i") | not)
+            )] | length
+          ')
+
+          if [ "$PENDING" -gt 0 ]; then
+            echo "::error::CI checks are still pending on main ($PENDING pending). Wait for CI to complete before releasing."
+            exit 1
+          fi
+          if [ "$FAILED" -gt 0 ]; then
+            echo "::error::CI is not green on main ($FAILED failed checks). Fix CI before releasing."
+            echo "$CHECKS_JSON" | jq -r '
+              .[] | select(
+                .status == "completed" and
+                .conclusion != "success" and
+                .conclusion != "skipped" and
+                .conclusion != "neutral"
+              ) | "  - \(.name): \(.conclusion) (\(.html_url))"
+            '
+            exit 1
+          fi
+
+          echo "All CI checks are green on main."
+
+      # =====================================================================
+      # Checkout with full history (required for cog bump)
+      # =====================================================================
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          ref: main
+          fetch-depth: 0
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+      # =====================================================================
+      # Configure git identity (must happen before cog bump creates a commit)
+      # =====================================================================
+      - name: Configure git identity
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+
+      # =====================================================================
+      # Install cocogitto
+      # =====================================================================
+      - name: Install cocogitto
+        uses: cocogitto/cocogitto-action@9a9fe03b31c47444290c0d7f9b1ee1b44ee13f20
+        with:
+          command: "--config .cog.toml get-version"
+
+      # =====================================================================
+      # Determine version (either from cog bump or from resume input)
+      # =====================================================================
+      - name: Determine version
+        id: version
+        env:
+          INPUT_VERSION: ${{ inputs.version }}
+          INPUT_BUMP: ${{ inputs.bump }}
+        run: |
+          if [ -n "$INPUT_VERSION" ]; then
+            # Resume mode: version is provided explicitly
+            VERSION="$INPUT_VERSION"
+            echo "Resuming release for version: $VERSION"
+            echo "resume=true" >> "$GITHUB_OUTPUT"
+          else
+            # Normal mode: compute version from conventional commits
+            echo "Computing next version with cog bump --${INPUT_BUMP} --dry-run..."
+            DRY_RUN_OUTPUT=$(cog --config .cog.toml bump --"${INPUT_BUMP}" --dry-run 2>&1) || {
+              echo "::error::cog bump --dry-run failed. No releasable commits?"
+              echo "$DRY_RUN_OUTPUT"
+              exit 1
+            }
+            echo "$DRY_RUN_OUTPUT"
+
+            # Extract version from dry-run output
+            # cog bump --dry-run prints the next version on a line like "v19.2.0" or similar
+            VERSION=$(echo "$DRY_RUN_OUTPUT" | grep -oP '\d+\.\d+\.\d+' | tail -1)
+            if [ -z "$VERSION" ]; then
+              echo "::error::Could not extract version from cog bump --dry-run output"
+              echo "$DRY_RUN_OUTPUT"
+              exit 1
+            fi
+            echo "Next version: $VERSION"
+            echo "resume=false" >> "$GITHUB_OUTPUT"
+          fi
+
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+
+      # =====================================================================
+      # Guard: check tag does not already exist on remote (skip in resume mode)
+      # =====================================================================
+      - name: Check tag does not exist
+        if: steps.version.outputs.resume != 'true'
+        run: |
+          VERSION="${{ steps.version.outputs.version }}"
+          TAG="v${VERSION}"
+          if git ls-remote --tags origin "refs/tags/${TAG}" | grep -q "${TAG}"; then
+            echo "::error::Tag ${TAG} already exists on remote. Release v${VERSION} was already created."
+            exit 1
+          fi
+          echo "Tag ${TAG} does not exist yet. Proceeding."
+
+      # =====================================================================
+      # Run cog bump (skip in resume mode)
+      # =====================================================================
+      - name: Run cog bump
+        if: steps.version.outputs.resume != 'true'
+        env:
+          INPUT_BUMP: ${{ inputs.bump }}
+        run: |
+          echo "Running cog bump --${INPUT_BUMP}..."
+          cog --config .cog.toml bump --"${INPUT_BUMP}"
+          echo "Version bump complete."
+
+          # Verify the bump commit was created
+          VERSION="${{ steps.version.outputs.version }}"
+          COMMIT_MSG=$(git log -1 --format='%s')
+          echo "Latest commit: $COMMIT_MSG"
+
+          if ! echo "$COMMIT_MSG" | grep -qP "^chore\(version\): v${VERSION}$"; then
+            echo "::error::Expected commit message 'chore(version): v${VERSION}' but got '${COMMIT_MSG}'"
+            exit 1
+          fi
+
+      # =====================================================================
+      # Inject highlights into CHANGELOG.md (if provided)
+      # =====================================================================
+      - name: Inject highlights
+        if: inputs.highlights != '' && steps.version.outputs.resume != 'true'
+        env:
+          HIGHLIGHTS: ${{ inputs.highlights }}
+        run: |
+          VERSION="${{ steps.version.outputs.version }}"
+
+          echo "Injecting highlights for v${VERSION}..."
+
+          # Find the version header line number in CHANGELOG.md
+          HEADER_LINE=$(grep -n "^## \[v${VERSION}\]" CHANGELOG.md | head -1 | cut -d: -f1)
+          if [ -z "$HEADER_LINE" ]; then
+            echo "::error::Could not find version header '## [v${VERSION}]' in CHANGELOG.md"
+            exit 1
+          fi
+
+          # Insert highlights after the version header line using a temp file
+          # HIGHLIGHTS comes from the environment variable (safe from shell injection)
+          {
+            head -n "$HEADER_LINE" CHANGELOG.md
+            printf '\n### Highlights\n\n%s\n' "$HIGHLIGHTS"
+            tail -n +"$((HEADER_LINE + 1))" CHANGELOG.md
+          } > CHANGELOG.md.tmp
+          mv CHANGELOG.md.tmp CHANGELOG.md
+
+          echo "Highlights injected. Amending bump commit..."
+          git add CHANGELOG.md
+          git commit --amend --no-edit
+
+          # Move the tag to the amended commit
+          git tag -f "v${VERSION}"
+
+          echo "Bump commit amended with highlights."
+
+      # =====================================================================
+      # Push bump commit and tag to main
+      # =====================================================================
+      - name: Push to main
+        if: steps.version.outputs.resume != 'true'
+        run: |
+          VERSION="${{ steps.version.outputs.version }}"
+          TAG="v${VERSION}"
+
+          echo "Pushing bump commit and tag ${TAG} to main..."
+          git push origin HEAD:main "${TAG}" || {
+            echo "::error::Push to main failed. This could mean:"
+            echo "  - Someone pushed to main during this workflow run (retry the workflow)"
+            echo "  - github-actions[bot] is not in the branch protection bypass list"
+            exit 1
+          }
+
+          echo "Pushed commit and tag ${TAG} to main."
+
+      # =====================================================================
+      # Extract changelog section for this version
+      # =====================================================================
+      - name: Extract changelog
+        id: changelog
+        run: |
+          VERSION="${{ steps.version.outputs.version }}"
+
+          # In resume mode, fetch the latest main to get the CHANGELOG.md
+          if [ "${{ steps.version.outputs.resume }}" = "true" ]; then
+            git fetch origin main
+            git checkout FETCH_HEAD -- CHANGELOG.md 2>/dev/null || true
+          fi
+
+          echo "Extracting changelog for v${VERSION}..."
+
+          # Extract content between the version header and the next version header or separator
+          NOTES=$(awk "
+            /^## \\[v${VERSION}\\]/ { found=1; next }
+            found && /^## \\[v/   { exit }
+            found && /^- - -/     { exit }
+            found                  { print }
+          " CHANGELOG.md)
+
+          if [ -z "$NOTES" ]; then
+            NOTES="Release v${VERSION}"
+            echo "::warning::No changelog section found for v${VERSION}. Using default release notes."
+          fi
+
+          # Write to file for use in gh release create
+          echo "$NOTES" > /tmp/release_notes.md
+          echo "Release notes:"
+          cat /tmp/release_notes.md
+
+      # =====================================================================
+      # Create GitHub Release
+      # =====================================================================
+      - name: Create GitHub Release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          VERSION="${{ steps.version.outputs.version }}"
+          TAG="v${VERSION}"
+
+          # Check if release already exists (idempotent)
+          if gh release view "${TAG}" --repo "${{ github.repository }}" > /dev/null 2>&1; then
+            echo "::warning::GitHub Release ${TAG} already exists. Skipping creation."
+            exit 0
+          fi
+
+          echo "Creating GitHub Release ${TAG}..."
+          RELEASE_URL=$(gh release create "${TAG}" \
+            --repo "${{ github.repository }}" \
+            --title "${TAG}" \
+            --notes-file /tmp/release_notes.md)
+
+          echo "Release created: ${RELEASE_URL}"
+
+      # =====================================================================
+      # Summary
+      # =====================================================================
+      - name: Summary
+        run: |
+          VERSION="${{ steps.version.outputs.version }}"
+          TAG="v${VERSION}"
+          echo "## Release ${TAG}" >> "$GITHUB_STEP_SUMMARY"
+          echo "" >> "$GITHUB_STEP_SUMMARY"
+          echo "- **Version:** ${VERSION}" >> "$GITHUB_STEP_SUMMARY"
+          echo "- **Tag:** ${TAG}" >> "$GITHUB_STEP_SUMMARY"
+          echo "- **Release:** https://github.com/${{ github.repository }}/releases/tag/${TAG}" >> "$GITHUB_STEP_SUMMARY"
+          echo "" >> "$GITHUB_STEP_SUMMARY"
+          echo "PyPI publishing is handled by the CI workflow (publish-pypi job) which" >> "$GITHUB_STEP_SUMMARY"
+          echo "triggers automatically on the main push." >> "$GITHUB_STEP_SUMMARY"

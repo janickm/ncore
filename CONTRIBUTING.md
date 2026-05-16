@@ -154,9 +154,48 @@ automatically.
 
 NCore uses [Semantic Versioning](https://semver.org/) with versions determined automatically from [Conventional Commits](https://www.conventionalcommits.org/) via [cocogitto](https://docs.cocogitto.io/).
 
+### Creating a Release
+
+Releases are created via the **Release** GitHub Actions workflow. A single command triggers the entire flow:
+
+```bash
+# Standard release (version auto-determined from conventional commits)
+gh workflow run release.yml -f bump=auto
+
+# Force a specific bump type
+gh workflow run release.yml -f bump=minor
+gh workflow run release.yml -f bump=major
+
+# Release with highlights (inserted into CHANGELOG.md)
+gh workflow run release.yml -f bump=auto \
+  -f highlights='- New point cloud component for native storage
+- 2x faster camera model projection'
+
+# Resume a failed release (skips cog bump, picks up from tag/release creation)
+gh workflow run release.yml -f version=19.2.0
+```
+
+The workflow:
+
+1. Verifies that CI is green on main
+2. Runs `cog bump` to compute the next version from conventional commits
+3. Updates `.bazelrc` (embed_label), generates CHANGELOG.md, creates the bump commit and tag
+4. Injects optional highlights into the changelog
+5. Pushes the bump commit and tag to main
+6. Creates a GitHub Release with the changelog notes
+7. PyPI publishing is handled automatically by the existing CI workflow
+
+### Previewing the Next Version
+
+To preview what version `cog bump` would produce without making any changes:
+
+```bash
+cog --config .cog.toml bump --auto --dry-run
+```
+
 ### Cocogitto Configuration
 
-Cocogitto is configured via `.cog.toml` in the repository root. All `cog` commands must reference this config:
+Cocogitto is configured via `.cog.toml` in the repository root. Useful commands:
 
 ```bash
 cog --config .cog.toml check                   # Validate commit messages

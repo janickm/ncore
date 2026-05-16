@@ -16,11 +16,11 @@
 # Unified CI workflow that handles:
 # - Build and test (all branches)
 # - Documentation deployment to GitHub Pages (main branch only)
-# - Python package publishing to Test PyPI (main branch only)
+# - Python package publishing to PyPI (main branch only)
 #
 # Setup required:
 # 1. GitHub Pages: Settings -> Pages -> Source: GitHub Actions
-# 2. Test PyPI token: Settings -> Secrets -> TEST_PYPI_API_TOKEN
+# 2. PyPI token: Settings -> Secrets -> PYPI_API_TOKEN
 
 name: CI
 
