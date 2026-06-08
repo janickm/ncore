@@ -1,0 +1,107 @@
+.. SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+.. SPDX-License-Identifier: Apache-2.0
+
+Argoverse 2 Dataset
+===================
+
+The NCore Argoverse 2 tool converts data from the
+`Argoverse 2 <https://www.argoverse.org/av2.html>`_ Sensor Dataset into NCore
+V4 format. The converter reads the Argoverse 2 on-disk Apache Feather files
+directly with ``pyarrow`` and deliberately avoids the heavy ``av2`` devkit
+(which pulls in torch, kornia, numba, polars and PyAV). The only additional
+dependency is ``pyquaternion``.
+
+.. _argoverse2_data_conventions:
+
+Conventions
+-----------
+
+Argoverse 2 provides data from 9 cameras and 2 lidars; it has no radar. The
+converter handles all sensor modalities and 3D cuboid annotations.
+
+Camera Sensors
+^^^^^^^^^^^^^^
+    1. **ring_front_center** -- 2048x1550 (portrait)
+    2. **ring_front_left** -- 1550x2048
+    3. **ring_front_right** -- 1550x2048
+    4. **ring_side_left** -- 1550x2048
+    5. **ring_side_right** -- 1550x2048
+    6. **ring_rear_left** -- 1550x2048
+    7. **ring_rear_right** -- 1550x2048
+    8. **stereo_front_left** -- 1550x2048
+    9. **stereo_front_right** -- 1550x2048
+
+All nine cameras are global shutter and the released imagery is already
+undistorted, so camera intrinsics are stored using
+:class:`~ncore.data.OpenCVPinholeCameraModelParameters` with
+``ShutterType.GLOBAL`` and zero distortion coefficients. The ``k1, k2, k3``
+coefficients present in ``intrinsics.feather`` are intentionally ignored.
+
+LiDAR Sensors
+^^^^^^^^^^^^^
+    1. **up_lidar** -- Velodyne VLP-32C, 32 beams, 10 Hz
+    2. **down_lidar** -- Velodyne VLP-32C, 32 beams, 10 Hz
+
+Argoverse 2 sweeps are egomotion-compensated to the sweep reference timestamp
+and provided in the egovehicle frame, with real per-point timestamps
+(``offset_ns``). The two stacked VLP-32C units are stored separately, each with
+its own static extrinsic. Points are split per unit by ``laser_number``,
+mapped into the unit's own sensor frame, and decompensated using the real
+per-point timestamps so that NCore stores raw per-point-time ray directions.
+Because the sensor extrinsic is static, this decompensation is independent of
+whether the source data applied ego-motion before or after the sensor
+transform.
+
+No structured lidar model is stored in this version (``model_element`` is
+``None``); a derived VLP-32C structured model can be added as a follow-up. The
+``laser_number`` to up/down unit split is not documented by Argoverse 2. The two
+units occupy the two laser-number halves (``< 32`` and ``>= 32``); the unit
+*label* is recovered from extrinsic geometry by per-beam elevation flatness -- a
+laser ring traces a constant-elevation cone only in its own sensor frame, so the
+wrong extrinsic tilts the cone and inflates the per-ring elevation spread. The
+decision is made once per log and is stable with a wide (~2-10x) margin.
+
+Annotations
+^^^^^^^^^^^
+
+3D cuboid annotations are native to the egovehicle frame and are stored against
+the ``rig`` frame at the sweep timestamp (lossless, no transform). The
+``track_uuid`` is used as the track ID.
+
+Coordinate Frames
+^^^^^^^^^^^^^^^^^
+
+The first ego pose's ``city_SE3_egovehicle`` is stored as the static
+``world -> world_global`` pose, so ``world_global`` is the Argoverse 2 city
+frame. All absolute city coordinates remain recoverable for later alignment
+with the Argoverse 2 HD map (which the converter does not export).
+
+Usage
+-----
+
+.. code-block:: bash
+
+    bazel run //tools/data_converter/argoverse2 -- \
+        --root-dir /path/to/argoverse2/sensor \
+        --output-dir /path/to/output \
+        argoverse2-v4 \
+        --split val
+
+Convert a single log:
+
+.. code-block:: bash
+
+    bazel run //tools/data_converter/argoverse2 -- \
+        --root-dir /path/to/argoverse2/sensor \
+        --output-dir /path/to/output \
+        argoverse2-v4 \
+        --split val \
+        --log-id 02678d04-cc9f-3148-9f95-1ba66347dff9
+
+Testing
+-------
+
+.. code-block:: bash
+
+    AV2_DIR=/path/to/argoverse2/sensor AV2_SPLIT=val \
+        bazel test //tools/data_converter/argoverse2:pytest_converter
