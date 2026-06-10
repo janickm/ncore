@@ -226,7 +226,8 @@ class TestArgoverse2Converter(unittest.TestCase):
 
     # --- Cuboids --------------------------------------------------------------
 
-    def test_cuboids_in_rig_frame(self):
+    def test_cuboids_in_static_world_frame(self):
+        """Cuboids are baked into the static ``world`` frame (time-independent)."""
         cuboid_readers = self.reader.open_component_readers(CuboidsComponent.Reader)
         if not cuboid_readers:
             self.skipTest("No cuboids (test split)")
@@ -234,4 +235,55 @@ class TestArgoverse2Converter(unittest.TestCase):
         observations = list(cuboid_reader.get_observations())
         self.assertGreater(len(observations), 0)
         for obs in observations[:50]:
-            self.assertEqual(obs.reference_frame_id, "rig")
+            self.assertEqual(obs.reference_frame_id, "world")
+
+    def test_cuboids_align_with_lidar(self):
+        """A reasonable fraction of lidar points fall inside annotated cuboids.
+
+        This is the regression guard for the timestamp/frame shift: if cuboids were
+        mis-referenced relative to the lidar, almost no points would land inside
+        them. We transform first-frame lidar points (sensor -> world) and count
+        points inside the cuboids active at that sweep.
+        """
+        from ncore.impl.common.transformations import is_within_3d_bboxes
+
+        cuboid_readers = self.reader.open_component_readers(CuboidsComponent.Reader)
+        if not cuboid_readers:
+            self.skipTest("No cuboids (test split)")
+
+        poses_reader = list(self.reader.open_component_readers(PosesComponent.Reader).values())[0]
+        lidar_reader = self.reader.open_component_readers(LidarSensorComponent.Reader)["up_lidar"]
+        frame_start_us, frame_end_us = (int(v) for v in lidar_reader.frames_timestamps_us[0])
+        ts = frame_end_us  # reader frame key is the end-of-frame timestamp
+
+        # The cuboid reference timestamp is the AV2 sweep reference time, which is
+        # the start of the point window (offset_ns runs forward from it).
+        cuboid_ts = frame_start_us
+
+        # Each lidar point is in its own per-point-time sensor frame; transform via
+        # sensor -> rig (static) and rig -> world at the point's own timestamp.
+        static = dict(poses_reader.get_static_poses())
+        T_up_rig = static[("up_lidar", "rig")]
+        rig_poses, pose_ts = poses_reader.get_dynamic_pose("rig", "world")
+
+        direction = lidar_reader.get_frame_ray_bundle_data(ts, "direction")
+        distance = np.asarray(lidar_reader._get_ray_bundle_returns_group(ts)["distance_m"])[0]
+        point_ts = lidar_reader.get_frame_ray_bundle_data(ts, "timestamp_us").astype(np.int64)
+        valid = np.isfinite(distance) & (distance > 0)
+        pts_sensor = direction[valid] * distance[valid, None]
+        pts_rig = (T_up_rig[:3, :3] @ pts_sensor.T).T + T_up_rig[:3, 3]
+        # Per-point rig -> world using the nearest stored pose (poses are dense).
+        nearest = np.searchsorted(pose_ts.astype(np.int64), point_ts[valid]).clip(0, len(rig_poses) - 1)
+        T_pts = rig_poses[nearest]
+        pts_world = np.einsum("nij,nj->ni", T_pts[:, :3, :3], pts_rig) + T_pts[:, :3, 3]
+
+        observations = list(list(cuboid_readers.values())[0].get_observations())
+        # cuboids active at this sweep (cuboid ref ts == sweep start)
+        active = [o for o in observations if abs(o.reference_frame_timestamp_us - cuboid_ts) < 2000]
+        self.assertGreater(len(active), 0, "no cuboids active at first lidar frame")
+        boxes = np.stack([o.bbox3.to_array() for o in active])
+        inside = is_within_3d_bboxes(pts_world.astype(np.float64), boxes.astype(np.float64))
+        n_inside = int(inside.any(axis=1).sum())
+        self.assertGreater(
+            n_inside, 50, f"only {n_inside} lidar points inside any cuboid -- likely a frame/timestamp shift"
+        )

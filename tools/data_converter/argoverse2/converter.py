@@ -30,7 +30,12 @@ import tqdm
 from pyquaternion import Quaternion
 from upath import UPath
 
-from ncore.impl.common.transformations import HalfClosedInterval, MotionCompensator, se3_inverse
+from ncore.impl.common.transformations import (
+    HalfClosedInterval,
+    MotionCompensator,
+    se3_inverse,
+    transform_bbox,
+)
 from ncore.impl.data.types import (
     BBox3,
     CuboidTrackObservation,
@@ -114,8 +119,11 @@ class Argoverse2Converter4(FileBasedDataConverter):
       structured lidar model is stored in this first version (``model_element``
       is ``None``); a derived VLP-32C model can be added as a follow-up.
     - Radar: AV2 has no radar.
-    - Cuboid annotations: native egovehicle frame, stored against ``rig`` at the
-      sweep timestamp (lossless, no transform).
+    - Cuboid annotations: native to the egovehicle frame at the sweep reference
+      time. Baked into the static ``world`` frame at conversion time using the
+      exact ego pose, so their position does not depend on dynamic-pose
+      interpolation (the ego moves ~1 m across a sweep, which otherwise shows up
+      as a shift relative to the lidar).
 
     The first ego pose's ``city_SE3_egovehicle`` is stored as the static
     ``world -> world_global`` anchor, so ``world_global`` is the AV2 city frame.
@@ -161,6 +169,12 @@ class Argoverse2Converter4(FileBasedDataConverter):
         pose_timestamps_ns, T_ego_city_all = read_city_se3_ego(log_dir)
         n_poses = len(pose_timestamps_ns)
         assert n_poses >= 2, f"Log has fewer than 2 ego poses: {n_poses}"
+
+        # Full-precision ego pose lookup keyed by the raw nanosecond timestamp.
+        # AV2 annotation timestamps map exactly onto these pose timestamps, so we
+        # can look up the exact city_SE3_egovehicle pose for each annotated sweep
+        # (used to bake cuboids into the static world_global / city frame).
+        ego_city_by_ts_ns: Dict[int, np.ndarray] = {int(ts): T for ts, T in zip(pose_timestamps_ns, T_ego_city_all)}
 
         pose_timestamps_us = np.array([_ns_to_us(t) for t in pose_timestamps_ns], dtype=np.uint64)
 
@@ -294,6 +308,8 @@ class Argoverse2Converter4(FileBasedDataConverter):
             log_dir=log_dir,
             store_writer=store_writer,
             component_groups=component_groups,
+            ego_city_by_ts_ns=ego_city_by_ts_ns,
+            T_world_global_inv=T_world_global_inv,
         )
 
         # --- Finalize ---------------------------------------------------------
@@ -542,11 +558,23 @@ class Argoverse2Converter4(FileBasedDataConverter):
         log_dir: UPath,
         store_writer: SequenceComponentGroupsWriter,
         component_groups: ComponentGroupAssignments,
+        ego_city_by_ts_ns: Dict[int, np.ndarray],
+        T_world_global_inv: np.ndarray,
     ) -> None:
         """Decode AV2 3D annotations and store as cuboid track observations.
 
-        Annotations are native to the egovehicle frame and are stored against the
-        ``rig`` frame at the sweep timestamp (lossless, no transform).
+        AV2 cuboids are native to the egovehicle frame *at the sweep reference
+        timestamp*. The egovehicle moves up to ~1 m across a single ~100 ms sweep,
+        so referencing cuboids to the dynamic ``rig`` frame makes their rendered
+        position depend on how a downstream consumer interpolates the rig pose for
+        a given timestamp -- which produces a visible shift relative to the lidar.
+
+        To avoid that, we bake each cuboid into the static ``world`` frame at
+        conversion time using the exact ``city_SE3_egovehicle`` pose for the
+        annotated sweep. ``world`` is the local frame anchored at the first ego
+        pose (``world_global`` is the AV2 city frame), so storing here is both
+        time-independent and float32-safe. This mirrors the nuScenes converter,
+        which stores cuboids in a static global frame.
         """
         annotations_path = log_dir / "annotations.feather"
         if not annotations_path.exists():
@@ -557,43 +585,58 @@ class Argoverse2Converter4(FileBasedDataConverter):
         n = len(cols["category"])
 
         cuboid_observations: List[CuboidTrackObservation] = []
+        missing_pose = 0
         for i in tqdm.tqdm(range(n), total=n, desc="Process cuboids"):
             category = str(cols["category"][i])
             if category not in AV2_CATEGORY_MAP:
                 continue
 
-            timestamp_us = _ns_to_us(int(cols["timestamp_ns"][i]))
+            ts_ns = int(cols["timestamp_ns"][i])
+            timestamp_us = _ns_to_us(ts_ns)
+
+            T_ego_city = ego_city_by_ts_ns.get(ts_ns)
+            if T_ego_city is None:
+                missing_pose += 1
+                continue
+
             yaw = Quaternion(cols["qw"][i], cols["qx"][i], cols["qy"][i], cols["qz"][i]).yaw_pitch_roll[0]
 
+            # Cuboid in the egovehicle frame at the sweep reference time.
             # AV2: length_m -> x extent, width_m -> y extent, height_m -> z extent.
-            bbox3 = BBox3.from_array(
-                np.array(
-                    [
-                        cols["tx_m"][i],
-                        cols["ty_m"][i],
-                        cols["tz_m"][i],
-                        cols["length_m"][i],
-                        cols["width_m"][i],
-                        cols["height_m"][i],
-                        0.0,  # rx
-                        0.0,  # ry
-                        yaw,  # rz
-                    ],
-                    dtype=np.float32,
-                )
+            bbox_ego = np.array(
+                [
+                    cols["tx_m"][i],
+                    cols["ty_m"][i],
+                    cols["tz_m"][i],
+                    cols["length_m"][i],
+                    cols["width_m"][i],
+                    cols["height_m"][i],
+                    0.0,  # roll
+                    0.0,  # pitch
+                    yaw,
+                ],
+                dtype=np.float64,
             )
+
+            # ego -> city -> world (static local anchor).
+            T_world_ego = T_world_global_inv @ T_ego_city
+            bbox_world = transform_bbox(bbox_ego, T_world_ego)
+            bbox3 = BBox3.from_array(bbox_world.astype(np.float32))
 
             cuboid_observations.append(
                 CuboidTrackObservation(
                     track_id=str(cols["track_uuid"][i]),
                     class_id=AV2_CATEGORY_MAP[category],
                     timestamp_us=timestamp_us,
-                    reference_frame_id="rig",
+                    reference_frame_id="world",
                     reference_frame_timestamp_us=timestamp_us,
                     bbox3=bbox3,
                     source=LabelSource.EXTERNAL,
                 )
             )
+
+        if missing_pose:
+            self.logger.warning(f"Skipped {missing_pose} cuboids with no matching ego pose timestamp")
 
         if cuboid_observations:
             store_writer.register_component_writer(

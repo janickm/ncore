@@ -64,8 +64,12 @@ decision is made once per log and is stable with a wide (~2-10x) margin.
 Annotations
 ^^^^^^^^^^^
 
-3D cuboid annotations are native to the egovehicle frame and are stored against
-the ``rig`` frame at the sweep timestamp (lossless, no transform). The
+3D cuboid annotations are native to the egovehicle frame at the sweep reference
+time. They are baked into the static ``world`` frame at conversion time using the
+exact ego pose for that sweep. This is deliberate: the egovehicle moves up to
+~1 m across a single ~100 ms sweep, so referencing cuboids to the dynamic ``rig``
+frame would make their rendered position depend on how a consumer interpolates
+the rig pose for a timestamp, appearing as a shift relative to the lidar. The
 ``track_uuid`` is used as the track ID.
 
 Coordinate Frames
