@@ -275,6 +275,80 @@ class TestMotionCompensator(unittest.TestCase):
                 f"inconsistent end points, frame_idx {frame_idx}",
             )
 
+    def test_idempotence_custom_reference_timestamp(self):
+        """compensate/decompensate round-trip with a non-default reference timestamp.
+
+        Compensating to a custom reference (here the frame start) and decompensating
+        back with the same reference must recover the original points. This covers
+        the Argoverse 2 case, where data is compensated to the sweep start rather
+        than the end of the frame.
+        """
+        motion_compensator = MotionCompensator(self.loader.pose_graph)
+        lidar_sensor = self.loader.get_lidar_sensor("lidar_gt_top_p128_v4p5")
+
+        for frame_idx in range(0, 2):
+            xyz_m_ref = lidar_sensor.get_frame_point_cloud(
+                frame_idx, motion_compensation=False, with_start_points=False, return_index=0
+            ).xyz_m_end
+            timestamp_us = lidar_sensor.get_frame_ray_bundle_timestamp_us(frame_idx)
+            frame_start_us = lidar_sensor.get_frame_timestamp_us(frame_idx, types.FrameTimepoint.START)
+            frame_end_us = lidar_sensor.get_frame_timestamp_us(frame_idx, types.FrameTimepoint.END)
+
+            # Use the frame start as the (non-default) compensation reference.
+            reference_us = frame_start_us
+
+            compensated = motion_compensator.motion_compensate_points(
+                lidar_sensor.sensor_id,
+                xyz_m_ref,
+                timestamp_us,
+                frame_start_us,
+                frame_end_us,
+                reference_timestamp_us=reference_us,
+            )
+
+            xyz_roundtrip = motion_compensator.motion_decompensate_points(
+                lidar_sensor.sensor_id,
+                compensated.xyz_e_sensorend,
+                timestamp_us,
+                frame_start_us,
+                frame_end_us,
+                reference_timestamp_us=reference_us,
+            )
+
+            self.assertIsNone(
+                np.testing.assert_array_almost_equal(
+                    np.zeros_like(delta := np.linalg.norm(xyz_roundtrip - xyz_m_ref, axis=1)),
+                    delta,
+                    decimal=2,
+                ),
+                f"custom-reference round-trip inconsistent, frame_idx {frame_idx}",
+            )
+
+    def test_decompensate_default_reference_matches_explicit_end(self):
+        """Passing reference_timestamp_us=frame_end equals the default (None)."""
+        motion_compensator = MotionCompensator(self.loader.pose_graph)
+        lidar_sensor = self.loader.get_lidar_sensor("lidar_gt_top_p128_v4p5")
+
+        xyz_m_ref = lidar_sensor.get_frame_point_cloud(
+            0, motion_compensation=False, with_start_points=False, return_index=0
+        ).xyz_m_end
+        timestamp_us = lidar_sensor.get_frame_ray_bundle_timestamp_us(0)
+        frame_start_us = lidar_sensor.get_frame_timestamp_us(0, types.FrameTimepoint.START)
+        frame_end_us = lidar_sensor.get_frame_timestamp_us(0, types.FrameTimepoint.END)
+
+        default = motion_compensator.motion_decompensate_points(
+            lidar_sensor.sensor_id, xyz_m_ref, timestamp_us, frame_start_us, frame_end_us
+        )
+        explicit = motion_compensator.motion_decompensate_points(
+            lidar_sensor.sensor_id,
+            xyz_m_ref,
+            timestamp_us,
+            frame_start_us,
+            frame_end_us,
+            reference_timestamp_us=frame_end_us,
+        )
+        np.testing.assert_array_equal(default, explicit)
+
 
 def get_SE3(t: np.ndarray) -> np.ndarray:
     """SE3 matrix with variable translation part"""

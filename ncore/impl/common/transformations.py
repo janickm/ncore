@@ -578,16 +578,26 @@ class MotionCompensator:
         timestamp_us: np.ndarray,
         frame_start_timestamp_us: int,
         frame_end_timestamp_us: int,
+        reference_timestamp_us: Optional[int] = None,
     ) -> MotionCompensationResult:
         """
-        Perform motion compensation of points in time-dependent sensor frame at measurement time to common *end-of-frame* sensor frame
+        Perform motion compensation of points in time-dependent sensor frame at measurement time to a common reference sensor frame
+
+        By default the reference is the end of the frame (``frame_end_timestamp_us``).
+        Pass ``reference_timestamp_us`` to compensate to a different reference frame
+        (e.g. the start of the sweep, as used by Argoverse 2). The chosen reference
+        must be inverted by :meth:`motion_decompensate_points` using the same
+        ``reference_timestamp_us``.
 
         Args:
             sensor_id (str): sensor the points are relative to
             xyz_pointtime(np.ndarray): points in time-dependent sensor frame (~before motion compensation), [N,3]
             timestamp_us(np.ndarray): timestamps of points, [N]
-            frame_start_timestamp_us(list): frame start timestamp, [2]
-            frame_end_timestamp_us(list): frame end timestamps, [2]
+            frame_start_timestamp_us(int): frame start timestamp
+            frame_end_timestamp_us(int): frame end timestamp
+            reference_timestamp_us(Optional[int]): timestamp of the reference sensor frame to
+                compensate to; defaults to ``frame_end_timestamp_us``. Must lie within
+                ``[frame_start_timestamp_us, frame_end_timestamp_us]``.
         Returns:
             MotionCompensationResult: result of the motion-compensation
         """
@@ -600,13 +610,19 @@ class MotionCompensator:
                 np.empty_like(xyz_pointtime, shape=(0, 3)), np.empty_like(xyz_pointtime, shape=(0, 3))
             )
 
+        if reference_timestamp_us is None:
+            reference_timestamp_us = frame_end_timestamp_us
+
         assert frame_start_timestamp_us <= timestamp_us.min() and timestamp_us.max() <= frame_end_timestamp_us, (
             "Point timestamps not in frame time bounds"
         )
+        assert frame_start_timestamp_us <= reference_timestamp_us <= frame_end_timestamp_us, (
+            "Reference timestamp not in frame time bounds"
+        )
 
-        # Interpolate egomotion at frame end timestamp for sensor reference pose at end-of-frame time
+        # Interpolate egomotion at the reference timestamp for the reference sensor pose
         T_world_sensorRef = self._pose_graph.evaluate_poses(
-            "world", sensor_id, np.array(frame_end_timestamp_us, dtype=np.uint64)
+            "world", sensor_id, np.array(reference_timestamp_us, dtype=np.uint64)
         )
 
         # Determine unique timestamps to only perform actually required pose interpolations (a lot of points share the same timestamp)
@@ -634,16 +650,27 @@ class MotionCompensator:
         timestamp_us: np.ndarray,
         frame_start_timestamp_us: int,
         frame_end_timestamp_us: int,
+        reference_timestamp_us: Optional[int] = None,
     ) -> np.ndarray:
         """
-        Decompensate motion of motin-compensated ponts to bring points into time-dependent sensor-frame
+        Decompensate motion of motion-compensated points to bring points into time-dependent sensor-frame
+
+        The input points are assumed to be expressed in the sensor frame at a single
+        *reference* timestamp (the timestamp the data was motion-compensated to). By
+        default this reference is the end of the frame (``frame_end_timestamp_us``),
+        matching :meth:`motion_compensate_points`. Datasets that compensate to a
+        different reference (e.g. Argoverse 2 compensates to the start of the sweep)
+        can pass ``reference_timestamp_us`` explicitly.
 
         Args:
             sensor_id (str): sensor the points are relative to
-            xyz_sensorend (np.array): motion-compensated points relative to sensor-end-frame to be decompensated, [N,3]
+            xyz_sensorend (np.array): motion-compensated points relative to the reference-time sensor frame to be decompensated, [N,3]
             timestamp_us(np.ndarray): timestamps of points, [N]
-            frame_start_timestamp_us(list): frame start timestamp, [2]
-            frame_end_timestamp_us(list): frame end timestamps, [2]
+            frame_start_timestamp_us(int): frame start timestamp
+            frame_end_timestamp_us(int): frame end timestamp
+            reference_timestamp_us(Optional[int]): timestamp of the sensor frame the points are
+                expressed in; defaults to ``frame_end_timestamp_us``. Must lie within
+                ``[frame_start_timestamp_us, frame_end_timestamp_us]``.
         Returns:
             xyz_pointtime(np.array): points in time-dependent sensor frame after motion-decompensation [n,3]
         """
@@ -654,33 +681,33 @@ class MotionCompensator:
         if not len(xyz_sensorend):
             return np.empty_like(xyz_sensorend, shape=(0, 3))
 
+        if reference_timestamp_us is None:
+            reference_timestamp_us = frame_end_timestamp_us
+
         assert frame_start_timestamp_us <= timestamp_us.min() and timestamp_us.max() <= frame_end_timestamp_us, (
             "Point timestamps not in frame time bounds"
         )
-
-        # Construct relative pose from end-of-frame reference coordinate system to start-of-frame coordinate system
-        T_sensor_worlds = self._pose_graph.evaluate_poses(
-            sensor_id, "world", np.array([frame_start_timestamp_us, frame_end_timestamp_us], dtype=np.uint64)
+        assert frame_start_timestamp_us <= reference_timestamp_us <= frame_end_timestamp_us, (
+            "Reference timestamp not in frame time bounds"
         )
 
-        T_sensor_end_sensor_start = (se3_inverse(T_sensor_worlds[0]) @ T_sensor_worlds[1]).astype(np.float32)
-
-        relative_frame_interpolator = PoseInterpolator(
-            np.stack([T_sensor_end_sensor_start, np.eye(4, dtype=np.float32)]),
-            [frame_start_timestamp_us, frame_end_timestamp_us],
-        )
+        # Relative pose mapping the reference-time sensor frame to each point's own
+        # sensor frame. Point at its own timestamp must remain fixed, so we evaluate
+        # the per-point sensor pose relative to the reference sensor pose:
+        #   T_sensorPointtime_sensorRef = inv(T_sensor_world[pt]) @ T_sensor_world[ref]
+        T_sensor_world_ref = self._pose_graph.evaluate_poses(
+            sensor_id, "world", np.array(reference_timestamp_us, dtype=np.uint64)
+        )  # [4, 4]
 
         # Determine unique timestamps to only perform actually required pose interpolations (a lot of points share the same timestamp)
         timestamp_unique, unique_timestamp_reverse_idxs = np.unique(timestamp_us, return_inverse=True)
 
-        # Interpolate the decompensation transformations
-        T_sensor_end_sensor_pointtime_unique = relative_frame_interpolator.interpolate_to_timestamps(
-            timestamp_unique, dtype=np.float32
-        )
+        T_world_sensor_pointtime_unique = self._pose_graph.evaluate_poses("world", sensor_id, timestamp_unique)
+        T_sensor_pointtime_sensor_ref_unique = (T_world_sensor_pointtime_unique @ T_sensor_world_ref).astype(np.float32)
 
         # Apply the decompensation transformations
         xyz_pointtime = transform_point_cloud(
-            xyz_sensorend[:, np.newaxis, :], T_sensor_end_sensor_pointtime_unique[unique_timestamp_reverse_idxs]
+            xyz_sensorend[:, np.newaxis, :], T_sensor_pointtime_sensor_ref_unique[unique_timestamp_reverse_idxs]
         ).squeeze(1)
 
         return xyz_pointtime

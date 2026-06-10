@@ -350,45 +350,6 @@ class Argoverse2Converter4(FileBasedDataConverter):
     # Lidar
     # -------------------------------------------------------------------------
 
-    @staticmethod
-    def _decompensate_to_pointtime(
-        compensator: MotionCompensator,
-        sensor_id: str,
-        xyz_ref: np.ndarray,
-        point_ts_us: np.ndarray,
-        reference_ts_us: int,
-    ) -> np.ndarray:
-        """Decompensate points from a fixed reference-time sensor frame to per-point time.
-
-        AV2 points are egomotion-compensated to the sweep *reference* timestamp
-        (``reference_ts_us``, the start of the sweep -- ``offset_ns`` runs forward
-        from it) and expressed in that single sensor reference frame. To recover the
-        raw per-point measurement we move each point from the reference-time sensor
-        frame to the sensor frame at its own timestamp:
-
-            ``T_sensorPointtime_sensorRef = inv(T_sensor_world[point_ts]) @ T_sensor_world[ref_ts]``
-
-        NCore's ``MotionCompensator.motion_decompensate_points`` cannot be used
-        directly here because it assumes points are referenced to the *end* of the
-        frame (the KITTI/nuScenes convention), whereas AV2 references the sweep
-        start. Using it with the wrong reference applies the full intra-sweep ego
-        motion (~1 m) as an error.
-        """
-        if not len(xyz_ref):
-            return np.empty_like(xyz_ref, shape=(0, 3))
-
-        pose_graph = compensator._pose_graph
-        T_sensor_world_ref = pose_graph.evaluate_poses(
-            sensor_id, "world", np.array(reference_ts_us, dtype=np.uint64)
-        )  # [4, 4]
-
-        unique_ts, inverse = np.unique(point_ts_us, return_inverse=True)
-        T_world_sensor_pt = pose_graph.evaluate_poses("world", sensor_id, unique_ts)  # [U, 4, 4]
-        # T_sensorPointtime_sensorRef = T_world_sensor[pt] @ T_sensor_world[ref]
-        T_pt_ref = (T_world_sensor_pt @ T_sensor_world_ref).astype(np.float32)[inverse]
-
-        return (np.einsum("nij,nj->ni", T_pt_ref[:, :3, :3], xyz_ref) + T_pt_ref[:, :3, 3]).astype(np.float32)
-
     def _decode_lidars(
         self,
         log_dir: UPath,
@@ -483,14 +444,15 @@ class Argoverse2Converter4(FileBasedDataConverter):
                 T_ego_unit = se3_inverse(T_unit_ego[unit])
                 xyz_sensor = (T_ego_unit[:3, :3] @ xyz_ego.T).T + T_ego_unit[:3, 3]
 
-                # Decompensate from the reference-time sensor frame (sweep start) to
-                # each point's own measurement time (raw per-point-time directions).
-                xyz_raw = self._decompensate_to_pointtime(
-                    compensator=compensators[unit],
+                # Decompensate from the reference-time sensor frame (the sweep start,
+                # AV2's compensation reference) to each point's own measurement time.
+                xyz_raw = compensators[unit].motion_decompensate_points(
                     sensor_id=unit,
-                    xyz_ref=xyz_sensor.astype(np.float32),
-                    point_ts_us=ts_unit,
-                    reference_ts_us=reference_ts_us,
+                    xyz_sensorend=xyz_sensor.astype(np.float32),
+                    timestamp_us=ts_unit,
+                    frame_start_timestamp_us=frame_start_us,
+                    frame_end_timestamp_us=frame_end_us,
+                    reference_timestamp_us=reference_ts_us,
                 )
 
                 distance_m = np.linalg.norm(xyz_raw, axis=1).astype(np.float32)
