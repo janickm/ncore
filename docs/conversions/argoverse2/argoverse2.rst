@@ -65,12 +65,10 @@ Annotations
 ^^^^^^^^^^^
 
 3D cuboid annotations are native to the egovehicle frame at the sweep reference
-time. They are baked into the static ``world`` frame at conversion time using the
-exact ego pose for that sweep. This is deliberate: the egovehicle moves up to
-~1 m across a single ~100 ms sweep, so referencing cuboids to the dynamic ``rig``
-frame would make their rendered position depend on how a consumer interpolates
-the rig pose for a timestamp, appearing as a shift relative to the lidar. The
-``track_uuid`` is used as the track ID.
+time. They are stored in the ``rig`` frame at that timestamp with no ego pose
+baked in, so the egovehicle motion stays out of the stored coordinates and
+remains swappable downstream (a V4 feature); the pose graph places the cuboids
+using the active ego trajectory. The ``track_uuid`` is used as the track ID.
 
 Coordinate Frames
 ^^^^^^^^^^^^^^^^^

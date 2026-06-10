@@ -226,8 +226,8 @@ class TestArgoverse2Converter(unittest.TestCase):
 
     # --- Cuboids --------------------------------------------------------------
 
-    def test_cuboids_in_static_world_frame(self):
-        """Cuboids are baked into the static ``world`` frame (time-independent)."""
+    def test_cuboids_in_rig_frame(self):
+        """Cuboids are stored in the native ``rig`` frame (no ego pose baked in)."""
         cuboid_readers = self.reader.open_component_readers(CuboidsComponent.Reader)
         if not cuboid_readers:
             self.skipTest("No cuboids (test split)")
@@ -235,17 +235,19 @@ class TestArgoverse2Converter(unittest.TestCase):
         observations = list(cuboid_reader.get_observations())
         self.assertGreater(len(observations), 0)
         for obs in observations[:50]:
-            self.assertEqual(obs.reference_frame_id, "world")
+            self.assertEqual(obs.reference_frame_id, "rig")
 
     def test_cuboids_align_with_lidar(self):
         """A reasonable fraction of lidar points fall inside annotated cuboids.
 
-        This is the regression guard for the timestamp/frame shift: if cuboids were
-        mis-referenced relative to the lidar, almost no points would land inside
-        them. We transform first-frame lidar points (sensor -> world) and count
-        points inside the cuboids active at that sweep.
+        This is the regression guard for the lidar decompensation reference bug: if
+        the points were decompensated against the wrong reference (or the cuboids
+        mis-referenced), almost no points would land inside the boxes. We transform
+        the stored (decompensated) first-frame lidar points to ``world`` via their
+        own per-point rig pose, transform the active cuboids from ``rig`` at the
+        sweep timestamp to ``world``, and count points inside.
         """
-        from ncore.impl.common.transformations import is_within_3d_bboxes
+        from ncore.impl.common.transformations import is_within_3d_bboxes, transform_bbox
 
         cuboid_readers = self.reader.open_component_readers(CuboidsComponent.Reader)
         if not cuboid_readers:
@@ -281,7 +283,12 @@ class TestArgoverse2Converter(unittest.TestCase):
         # cuboids active at this sweep (cuboid ref ts == sweep start)
         active = [o for o in observations if abs(o.reference_frame_timestamp_us - cuboid_ts) < 2000]
         self.assertGreater(len(active), 0, "no cuboids active at first lidar frame")
-        boxes = np.stack([o.bbox3.to_array() for o in active])
+
+        # Cuboids are in rig at the sweep timestamp; bring them to world via the
+        # rig pose at that timestamp.
+        cuboid_pose_idx = int(np.argmin(np.abs(pose_ts.astype(np.int64) - cuboid_ts)))
+        T_rig_world_cuboid = rig_poses[cuboid_pose_idx]
+        boxes = np.stack([transform_bbox(o.bbox3.to_array().astype(np.float64), T_rig_world_cuboid) for o in active])
         inside = is_within_3d_bboxes(pts_world.astype(np.float64), boxes.astype(np.float64))
         n_inside = int(inside.any(axis=1).sum())
         self.assertGreater(

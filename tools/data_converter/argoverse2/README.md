@@ -69,12 +69,10 @@ bazel run //tools/data_converter/argoverse2 -- \
     decision is made once per log and is stable with a wide (~2-10x) margin.
 - **Radar**: AV2 has no radar.
 - **Cuboid annotations**: native to the egovehicle frame at the sweep reference
-  time. They are baked into the static `world` frame at conversion time using the
-  exact ego pose for that sweep. This is deliberate: the ego moves up to ~1 m
-  across a single ~100 ms sweep, so referencing cuboids to the dynamic `rig` frame
-  makes their rendered position depend on how a consumer interpolates the rig pose
-  for a timestamp, which appears as a shift relative to the lidar. `track_uuid` is
-  used as track ID.
+  time, stored in the `rig` frame at that timestamp with no ego pose baked in. This
+  keeps the egovehicle motion out of the stored coordinates so it stays swappable
+  downstream (a V4 feature); the pose graph places the cuboids using the active ego
+  trajectory. `track_uuid` is used as track ID.
 
 ## Coordinate frames
 
