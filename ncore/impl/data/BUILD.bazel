@@ -55,6 +55,7 @@ py_library(
     deps = [
         ":pylib_json_types",
         requirement("cbor2"),
+        requirement("fsspec"),
         requirement("numcodecs"),
         requirement("numpy"),
         requirement("typing_extensions"),

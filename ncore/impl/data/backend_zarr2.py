@@ -17,6 +17,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 
 from typing import TYPE_CHECKING, Iterator, List, Literal, Optional, Tuple, Union
@@ -195,6 +196,12 @@ class Zarr2Backend(Backend[BaseStore]):
         except KeyError:
             return None
         return record if isinstance(record, bytes) else None
+
+    @override
+    async def read_async(self, array: zarr.Array, selection: Selection) -> ReadResult:
+        """Asynchronous :meth:`read`, returning the same results (zarr-python 2 is synchronous: reads run on worker
+        threads, so the running event loop isn't blocked)"""
+        return await asyncio.get_running_loop().run_in_executor(None, self.read, array, selection)
 
     @override
     def compression(self, array: zarr.Array) -> Optional[BloscCompression]:
