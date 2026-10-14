@@ -17,6 +17,7 @@ import dataclasses
 import io
 import tempfile
 import threading
+import typing
 import unittest
 
 from typing import Any, Dict, List, Literal, Optional, Tuple, cast
@@ -102,19 +103,29 @@ def _record_store_reads(store_type: Literal["itar", "directory"], read_keys: Lis
     return mock.patch.object(store_cls, "get", recording_get)
 
 
-@parameterized_class(
-    ("store_type"),
-    [
-        ("itar",),
-        ("directory",),
-    ],
-)
+#: Store types and zarr formats of the component tests (zarr formats unsupported by the installed zarr-python version are
+#: skipped)
+STORE_TYPES_AND_ZARR_FORMATS = [
+    (store_type, zarr_format)
+    for store_type in ("itar", "directory")
+    for zarr_format in typing.get_args(nodes.ZarrFormat)
+]
+
+
+def _require_zarr_format(test: unittest.TestCase, zarr_format: nodes.ZarrFormat) -> None:
+    if zarr_format not in nodes.SUPPORTED_ZARR_FORMATS:
+        test.skipTest(f"zarr format v{zarr_format} requires zarr-python 3")
+
+
+@parameterized_class(("store_type", "zarr_format"), STORE_TYPES_AND_ZARR_FORMATS)
 class TestData4Reload(unittest.TestCase):
     """Test to verify functionality of V4 data writer + loader"""
 
     store_type: Literal["itar", "directory"]
+    zarr_format: nodes.ZarrFormat
 
     def setUp(self):
+        _require_zarr_format(self, self.zarr_format)
         # Make printed errors more representable numerically
         np.set_printoptions(floatmode="unique", linewidth=200, suppress=True)
 
@@ -140,6 +151,7 @@ class TestData4Reload(unittest.TestCase):
                 ref_sequence_timestamp_interval_us := HalfClosedInterval(int(0 * 1e6), int(1 * 1e6) + 1)
             ),
             store_type=self.store_type,
+            zarr_format=self.zarr_format,
             generic_meta_data=cast(JsonDocument, ref_generic_sequence_meta_data := {"some": 1, "key": 1.2}),
         )
 
@@ -541,6 +553,7 @@ class TestData4Reload(unittest.TestCase):
             store_base_name=store_writer._store_base_name,
             sequence_reader=SequenceComponentGroupsReader(store_paths, open_consolidated=open_consolidated),
             store_type=self.store_type,
+            zarr_format=self.zarr_format,
         )
 
         # Store cuboids with the new writer
@@ -1133,6 +1146,7 @@ class TestData4Reload(unittest.TestCase):
             sequence_id=seq_id,
             sequence_timestamp_interval_us=timestamp_interval,
             store_type=self.store_type,
+            zarr_format=self.zarr_format,
             generic_meta_data={},
         )
 
@@ -1197,6 +1211,7 @@ class TestData4Reload(unittest.TestCase):
             sequence_id=seq_id,
             sequence_timestamp_interval_us=timestamp_interval,
             store_type=self.store_type,
+            zarr_format=self.zarr_format,
             generic_meta_data={},
         )
 
@@ -1242,6 +1257,7 @@ class TestData4Reload(unittest.TestCase):
             sequence_id=seq_id,
             sequence_timestamp_interval_us=timestamp_interval,
             store_type=self.store_type,
+            zarr_format=self.zarr_format,
             generic_meta_data={},
         )
 
@@ -1291,6 +1307,7 @@ class TestData4Reload(unittest.TestCase):
             sequence_id=seq_id,
             sequence_timestamp_interval_us=timestamp_interval,
             store_type=self.store_type,
+            zarr_format=self.zarr_format,
             generic_meta_data={},
         )
 
@@ -1331,13 +1348,7 @@ class TestData4Reload(unittest.TestCase):
         tempdir.cleanup()
 
 
-@parameterized_class(
-    ("store_type"),
-    [
-        ("itar",),
-        ("directory",),
-    ],
-)
+@parameterized_class(("store_type", "zarr_format"), STORE_TYPES_AND_ZARR_FORMATS)
 class TestDataNewComponent(unittest.TestCase):
     """
     Test to demonstrate how to extend an existing dataset with a new custom component.
@@ -1349,8 +1360,10 @@ class TestDataNewComponent(unittest.TestCase):
     """
 
     store_type: Literal["itar", "directory"]
+    zarr_format: nodes.ZarrFormat
 
     def setUp(self):
+        _require_zarr_format(self, self.zarr_format)
         np.set_printoptions(floatmode="unique", linewidth=200, suppress=True)
 
     def test_new_component_extension(self):
@@ -1379,6 +1392,7 @@ class TestDataNewComponent(unittest.TestCase):
             sequence_id=sequence_id,
             sequence_timestamp_interval_us=(timestamp_interval := HalfClosedInterval(int(0 * 1e6), int(10 * 1e6) + 1)),
             store_type=self.store_type,
+            zarr_format=self.zarr_format,
             generic_meta_data={"dataset": "test", "version": 1.0},
         )
 
@@ -1510,6 +1524,7 @@ class TestDataNewComponent(unittest.TestCase):
             output_dir_path=UPath(tempdir.name),  # Same directory as initial
             store_base_name=sequence_id + "-extension",
             store_type=self.store_type,
+            zarr_format=self.zarr_format,
         )
 
         # Now add our custom velocity component to the extended dataset
@@ -1681,6 +1696,7 @@ class TestDataNewComponent(unittest.TestCase):
             sequence_id="test_v2",
             sequence_timestamp_interval_us=timestamp_interval,
             store_type=self.store_type,
+            zarr_format=self.zarr_format,
             generic_meta_data={"version": "v2_test"},
         )
 
@@ -1744,19 +1760,15 @@ class TestDataNewComponent(unittest.TestCase):
         # Version compatibility tests passed - all tests completed successfully
 
 
-@parameterized_class(
-    ("store_type"),
-    [
-        ("itar",),
-        ("directory",),
-    ],
-)
+@parameterized_class(("store_type", "zarr_format"), STORE_TYPES_AND_ZARR_FORMATS)
 class TestPointCloudsComponent(unittest.TestCase):
     """Round-trip tests for the PointCloudsComponent Writer/Reader."""
 
     store_type: Literal["itar", "directory"]
+    zarr_format: nodes.ZarrFormat
 
     def setUp(self):
+        _require_zarr_format(self, self.zarr_format)
         np.set_printoptions(floatmode="unique", linewidth=200, suppress=True)
 
     def _make_writer_reader(
@@ -1775,6 +1787,7 @@ class TestPointCloudsComponent(unittest.TestCase):
             sequence_id=seq_id,
             sequence_timestamp_interval_us=timestamp_interval,
             store_type=self.store_type,
+            zarr_format=self.zarr_format,
             generic_meta_data={},
         )
 
@@ -1877,7 +1890,9 @@ class TestPointCloudsComponent(unittest.TestCase):
         read_keys: List[str] = []
 
         def timestamp_chunk_reads() -> int:
-            return sum(key.endswith("pc_timestamps_us/0") for key in read_keys)
+            return sum(
+                key.endswith(("pc_timestamps_us/0", "pc_timestamps_us/c/0")) for key in read_keys
+            )  # (zarr format v2 / v3)
 
         # Nested instead of parenthesized context managers, which Python 3.8 doesn't support
         from_dict = PointCloudsComponent.AttributeSchema.from_dict
@@ -2154,19 +2169,15 @@ class TestPointCloudsComponent(unittest.TestCase):
         tmpdir.cleanup()
 
 
-@parameterized_class(
-    ("store_type"),
-    [
-        ("itar",),
-        ("directory",),
-    ],
-)
+@parameterized_class(("store_type", "zarr_format"), STORE_TYPES_AND_ZARR_FORMATS)
 class TestCameraLabelsComponent(unittest.TestCase):
     """Round-trip tests for the CameraLabelsComponent Writer/Reader."""
 
     store_type: Literal["itar", "directory"]
+    zarr_format: nodes.ZarrFormat
 
     def setUp(self):
+        _require_zarr_format(self, self.zarr_format)
         np.set_printoptions(floatmode="unique", linewidth=200, suppress=True)
 
     def _make_writer(
@@ -2190,6 +2201,7 @@ class TestCameraLabelsComponent(unittest.TestCase):
             sequence_id=seq_id,
             sequence_timestamp_interval_us=timestamp_interval,
             store_type=self.store_type,
+            zarr_format=self.zarr_format,
             generic_meta_data={},
         )
 
@@ -2515,6 +2527,7 @@ class TestCameraLabelsComponent(unittest.TestCase):
             sequence_id=seq_id,
             sequence_timestamp_interval_us=timestamp_interval,
             store_type="directory",
+            zarr_format=self.zarr_format,
             generic_meta_data={},
         )
 
@@ -2677,6 +2690,7 @@ class TestCameraLabelsComponent(unittest.TestCase):
             sequence_id=seq_id,
             sequence_timestamp_interval_us=timestamp_interval,
             store_type=self.store_type,
+            zarr_format=self.zarr_format,
             generic_meta_data={},
         )
 
@@ -2797,7 +2811,9 @@ class TestCameraLabelsComponent(unittest.TestCase):
         read_keys: List[str] = []
 
         def timestamp_chunk_reads() -> int:
-            return sum(key.endswith("timestamps_us/0") for key in read_keys)
+            return sum(
+                key.endswith(("timestamps_us/0", "timestamps_us/c/0")) for key in read_keys
+            )  # (zarr format v2 / v3)
 
         # Nested instead of parenthesized context managers, which Python 3.8 doesn't support
         from_dict = CameraLabelDescriptor.from_dict
@@ -3023,11 +3039,15 @@ class TestReaderNodeCaches(unittest.TestCase):
 # ==============================================================================
 
 
-@parameterized_class(("store_type",), [("itar",), ("directory",)])
+@parameterized_class(("store_type", "zarr_format"), STORE_TYPES_AND_ZARR_FORMATS)
 class TestPosesDtypes(unittest.TestCase):
     """Poses are read with the dtype they were stored with"""
 
     store_type: Literal["itar", "directory"]
+    zarr_format: nodes.ZarrFormat
+
+    def setUp(self):
+        _require_zarr_format(self, self.zarr_format)
 
     @parameterized.expand([(np.float32,), (np.float64,)])
     def test_pose_dtypes(self, dtype: type) -> None:
@@ -3038,6 +3058,7 @@ class TestPosesDtypes(unittest.TestCase):
                 sequence_id="poses-dtypes",
                 sequence_timestamp_interval_us=HalfClosedInterval(0, 2),
                 store_type=self.store_type,
+                zarr_format=self.zarr_format,
                 generic_meta_data={},
             )
             T = np.eye(4, dtype=dtype)
@@ -3061,19 +3082,15 @@ class TestPosesDtypes(unittest.TestCase):
             self.assertEqual(dict(reader.get_dynamic_poses())[("rig", "world")][0].dtype, np.dtype(dtype))
 
 
-@parameterized_class(
-    ("store_type"),
-    [
-        ("itar",),
-        ("directory",),
-    ],
-)
+@parameterized_class(("store_type", "zarr_format"), STORE_TYPES_AND_ZARR_FORMATS)
 class TestZeroDimArraySupport(unittest.TestCase):
     """Tests that arrays with zero-length dimensions can be stored and read back correctly."""
 
     store_type: Literal["itar", "directory"]
+    zarr_format: nodes.ZarrFormat
 
     def setUp(self):
+        _require_zarr_format(self, self.zarr_format)
         np.set_printoptions(floatmode="unique", linewidth=200, suppress=True)
 
     # ------------------------------------------------------------------
@@ -3090,6 +3107,7 @@ class TestZeroDimArraySupport(unittest.TestCase):
             sequence_id=seq_id,
             sequence_timestamp_interval_us=timestamp_interval,
             store_type=self.store_type,
+            zarr_format=self.zarr_format,
             generic_meta_data={},
         )
 
@@ -3153,6 +3171,7 @@ class TestZeroDimArraySupport(unittest.TestCase):
             sequence_id=seq_id,
             sequence_timestamp_interval_us=timestamp_interval,
             store_type=self.store_type,
+            zarr_format=self.zarr_format,
             generic_meta_data={},
         )
 
@@ -3195,6 +3214,7 @@ class TestZeroDimArraySupport(unittest.TestCase):
             sequence_id=seq_id,
             sequence_timestamp_interval_us=timestamp_interval,
             store_type=self.store_type,
+            zarr_format=self.zarr_format,
             generic_meta_data={},
         )
 
@@ -3261,6 +3281,7 @@ class TestZeroDimArraySupport(unittest.TestCase):
             sequence_id=seq_id,
             sequence_timestamp_interval_us=timestamp_interval,
             store_type=self.store_type,
+            zarr_format=self.zarr_format,
             generic_meta_data={},
         )
 
@@ -3317,6 +3338,7 @@ class TestZeroDimArraySupport(unittest.TestCase):
             sequence_id=seq_id,
             sequence_timestamp_interval_us=timestamp_interval,
             store_type=self.store_type,
+            zarr_format=self.zarr_format,
             generic_meta_data={},
         )
 
@@ -3370,6 +3392,7 @@ class TestZeroDimArraySupport(unittest.TestCase):
             sequence_id=seq_id,
             sequence_timestamp_interval_us=timestamp_interval,
             store_type=self.store_type,
+            zarr_format=self.zarr_format,
             generic_meta_data={},
         )
 
@@ -3444,6 +3467,7 @@ class TestZeroDimArraySupport(unittest.TestCase):
             sequence_id=seq_id,
             sequence_timestamp_interval_us=timestamp_interval,
             store_type=self.store_type,
+            zarr_format=self.zarr_format,
             generic_meta_data={},
         )
 
