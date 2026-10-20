@@ -270,6 +270,11 @@ synchronously. Custom components can implement asynchronous accessors via
    large requests), the asynchronous APIs random access and high-latency storage (exact,
    concurrent requests).
 
+   Synchronous APIs can fetch like the asynchronous ones with
+   ``SequenceComponentGroupsReader(..., itar_remote_range_reads=True)``: each read then
+   fetches exact byte ranges, and reads of multiple threads (e.g., a thread pool reading
+   frames) fetch concurrently, without asyncio.
+
 .. _cloud_storage_access:
 
 Cloud and Remote Storage Access
@@ -489,8 +494,9 @@ Performance Recommendations
   ``blockcache`` provides the best balance (~50 MB/s sequential,
   ~16 MB/s random on ``.itar``).  Larger block sizes (16--64 MB) improve
   sequential throughput at the cost of random access performance.  This
-  applies to the synchronous reader APIs only: the asynchronous ``*_async``
-  APIs fetch exact byte ranges concurrently (see :ref:`async_reads`).
+  applies to the synchronous reader APIs only (unless
+  ``itar_remote_range_reads=True``): the asynchronous ``*_async`` APIs fetch
+  exact byte ranges concurrently (see :ref:`async_reads`).
 
 * **Consider local caching** for repeated access to the same data. fsspec
   supports transparent caching via the ``simplecache`` or ``filecache``
