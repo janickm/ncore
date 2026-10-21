@@ -123,6 +123,21 @@ class TestIndexedTarArchive(unittest.TestCase):
     def tearDown(self):
         self._tmp.cleanup()
 
+    def test_read(self):
+        """read() is the synchronous read of the mapping interface (archive[key]), incl. empty records and records of the
+        index tail read"""
+        records = {"a": b"0123456789", "empty": b"", "large": bytes(range(256)) * 64}
+        with IndexedTarArchive(self.path, mode="w") as archive:
+            for key, value in records.items():
+                archive[key] = value
+        for tail in (None, 1 << 20):  # (records read from the file, records of the tail read)
+            archive = IndexedTarArchive(self.path, index_tail_read_size=tail)
+            for key, value in records.items():
+                self.assertEqual(archive.read(key), value, key)
+                self.assertEqual(archive[key], value, key)
+            with self.assertRaises(KeyError):
+                archive.read("missing")
+
     def test_records(self):
         records = {"a": b"0123456789", "dir/b": b"x" * 513, "empty": b"", "l" * 150 + "/long-key": bytes(range(256))}
         with IndexedTarArchive(self.path, mode="w") as archive:
@@ -321,9 +336,7 @@ class TestStores(unittest.TestCase):
         _write(self._store("itar", "w"), zarr_format=zarr_format)
 
         store = IndexedTarZarrStore(self.itar_path, index_tail_read_size=index_tail_read_size)
-        with mock.patch.object(
-            IndexedTarArchive, "__getitem__", autospec=True, side_effect=IndexedTarArchive.__getitem__
-        ) as getitem:
+        with mock.patch.object(IndexedTarArchive, "read", autospec=True, side_effect=IndexedTarArchive.read) as getitem:
             _check_reference(self, store.open_root_group(consolidated=True))
         read_keys = [call.args[1] for call in getitem.call_args_list]
         self.assertIn(V2_CONSOLIDATED_METADATA_KEY if zarr_format == 2 else V3_CONSOLIDATED_METADATA_KEY, read_keys)
@@ -898,7 +911,7 @@ class TestZeroCopyReads(unittest.TestCase):
     def _reads(self, root: nodes.Group) -> Dict[str, Tuple[Any, Dict[str, bytes]]]:
         """Read results, and the records read for them"""
         out: Dict[str, Tuple[Any, Dict[str, bytes]]] = {}
-        getitem = IndexedTarArchive.__getitem__
+        getitem = IndexedTarArchive.read
         for name, read in [
             ("blob_bytes", lambda: root.array("blob").read_bytes()),
             ("blob", lambda: root.array("blob").read()),
@@ -913,7 +926,7 @@ class TestZeroCopyReads(unittest.TestCase):
                 reads[key] = value = getitem(archive, key)
                 return value
 
-            with mock.patch.object(IndexedTarArchive, "__getitem__", autospec=True, side_effect=recording_getitem):
+            with mock.patch.object(IndexedTarArchive, "read", autospec=True, side_effect=recording_getitem):
                 out[name] = read(), reads
         return out
 

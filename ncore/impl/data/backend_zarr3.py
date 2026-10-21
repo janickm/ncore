@@ -225,7 +225,7 @@ class _IndexedTarStore(Store):
         self, key: str, prototype: Optional[BufferPrototype], byte_range: Optional[ByteRequest]
     ) -> Optional[Buffer]:
         try:
-            value = self.archive[key]
+            value = self.archive.read(key)
         except KeyError:
             return None
         start, end = self._byte_range(byte_range, len(value))
@@ -420,7 +420,7 @@ class Zarr3Backend(Backend[Store]):
             return None
         key = metadata.encode_chunk_key((0,) * len(shape))
         try:
-            record = store.archive[f"{store_path.path}/{key}" if store_path.path else key]
+            record = store.archive.read(f"{store_path.path}/{key}" if store_path.path else key)
         except KeyError:  # (chunk not stored: fill value)
             return None
         return self.chunk_view(record, dtype, shape)
