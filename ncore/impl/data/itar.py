@@ -43,6 +43,7 @@ from typing import IO, Any, Callable, ClassVar, Dict, Iterator, List, Literal, N
 from fsspec.asyn import AsyncFileSystem
 from upath import UPath
 
+from ncore.impl.common.async_util import run_in_thread
 from ncore.impl.data.encoding import decode_cbor_xz, encode_cbor_xz
 
 
@@ -192,17 +193,19 @@ class IndexedTarArchive:
             return key in self._records or key in self._node_metadata
 
     def __getitem__(self, key: str) -> bytes:
-        """Reads the payload of a record (raises KeyError if it doesn't exist)"""
-        if self._node_metadata:
-            with self._lock:
-                if (value := self._node_metadata.get(key)) is not None:
-                    return value
-        record = self._records[key]
+        """The payload of a record (raises KeyError if it doesn't exist), see :meth:`read`"""
+        return self.read(key)
 
-        # (records end before the index, which ends the tail read: records starting within the tail read are part of it)
-        if (tail := self._tail) is not None and record.offset >= tail.start:
-            start = record.offset - tail.start
-            return tail.data[start : start + record.size]
+    def read(self, key: str) -> bytes:
+        """Reads the payload of a record synchronously (raises KeyError if it doesn't exist).
+
+        Records held in memory (node metadata records of archives opened for writing, records of the index tail read)
+        are returned directly, records of local archives are read via positional reads, all other records via the
+        archive's buffered file object.
+        """
+        if (value := self._in_memory(key)) is not None:
+            return value
+        record = self._records[key]
 
         if self._pread_fd is not None:
             return self._pread(self._pread_fd, record.offset, record.size)
@@ -215,6 +218,22 @@ class IndexedTarArchive:
             self._file.seek(position)
             return value
 
+    def _in_memory(self, key: str) -> Optional[bytes]:
+        """The payload of a record held in memory (node metadata records of archives opened for writing, records of the
+        index tail read, empty records), None otherwise (raises KeyError if the record doesn't exist)"""
+        if self._node_metadata:
+            with self._lock:
+                if (value := self._node_metadata.get(key)) is not None:
+                    return value
+        record = self._records[key]
+        if record.size == 0:
+            return b""
+        # (records end before the index, which ends the tail read: records starting within the tail read are part of it)
+        if (tail := self._tail) is not None and record.offset >= tail.start:
+            start = record.offset - tail.start
+            return tail.data[start : start + record.size]
+        return None
+
     @property
     def is_remote(self) -> bool:
         """True for archives opened for reading on asynchronous fsspec filesystems (e.g., s3fs, gcsfs, http), whose
@@ -222,16 +241,18 @@ class IndexedTarArchive:
         return self._async_fs() is not None
 
     async def read_async(self, key: str) -> bytes:
-        """Reads the payload of a record asynchronously (raises KeyError if it doesn't exist).
+        """Reads the payload of a record asynchronously, without blocking the running event loop (raises KeyError if it
+        doesn't exist).
 
-        Records of remote archives (see :attr:`is_remote`) are read via asynchronous range requests (concurrent reads
-        overlap), all other records synchronously (see :meth:`__getitem__`).
+        Records held in memory are returned directly (see :meth:`read`). Records of remote archives (see
+        :attr:`is_remote`) are read via asynchronous range requests (concurrent reads overlap), records of all other
+        archives (e.g., local) by :meth:`read` on a worker thread.
         """
-        if (fs := self._async_fs()) is None or key in self._node_metadata:
-            return self[key]
+        if (value := self._in_memory(key)) is not None:
+            return value
+        if (fs := self._async_fs()) is None:
+            return await run_in_thread(self.read, key)
         record = self._records[key]
-        if ((tail := self._tail) is not None and record.offset >= tail.start) or record.size == 0:
-            return self[key]
 
         # (`_cat_file` is the coroutine asynchronous fsspec filesystems implement, `cat_file` its synchronous wrapper)
         request = fs._cat_file(self._itar_upath.path, start=record.offset, end=record.offset + record.size)

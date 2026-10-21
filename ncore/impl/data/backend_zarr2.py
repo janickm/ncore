@@ -17,7 +17,6 @@
 
 from __future__ import annotations
 
-import asyncio
 import json
 
 from typing import TYPE_CHECKING, Iterator, List, Literal, Optional, Tuple, Union
@@ -33,6 +32,7 @@ from typing_extensions import override
 from upath import UPath
 from zarr._storage.store import BaseStore, Store
 
+from ncore.impl.common.async_util import run_in_thread
 from ncore.impl.data.backend import (
     V2_CONSOLIDATED_METADATA_KEY,
     Attributes,
@@ -201,7 +201,7 @@ class Zarr2Backend(Backend[BaseStore]):
     async def read_async(self, array: zarr.Array, selection: Selection) -> ReadResult:
         """Asynchronous :meth:`read`, returning the same results (zarr-python 2 is synchronous: reads run on worker
         threads, so the running event loop isn't blocked)"""
-        return await asyncio.get_running_loop().run_in_executor(None, self.read, array, selection)
+        return await run_in_thread(self.read, array, selection)
 
     @override
     def compression(self, array: zarr.Array) -> Optional[BloscCompression]:

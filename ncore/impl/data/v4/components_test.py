@@ -74,13 +74,13 @@ from ncore.impl.data.v4.components import (
 def _record_store_reads(store_type: Literal["itar", "directory"], read_keys: List[str]) -> mock._patch:
     """Patch the record reads of the store type to append each read key to `read_keys`."""
     if store_type == "itar":
-        getitem = IndexedTarArchive.__getitem__
+        getitem = IndexedTarArchive.read
 
         def recording_getitem(archive: IndexedTarArchive, key: str) -> bytes:
             read_keys.append(key)
             return getitem(archive, key)
 
-        return mock.patch.object(IndexedTarArchive, "__getitem__", recording_getitem)
+        return mock.patch.object(IndexedTarArchive, "read", recording_getitem)
 
     # (the zarr-python store of directories: zarr-python 2's DirectoryStore is a synchronous mapping, zarr-python 3's
     # LocalStore reads asynchronously)

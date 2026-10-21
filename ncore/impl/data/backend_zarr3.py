@@ -254,7 +254,7 @@ class _IndexedTarStore(Store):
         self, key: str, prototype: Optional[BufferPrototype], byte_range: Optional[ByteRequest]
     ) -> Optional[Buffer]:
         try:
-            value = self.archive[key]
+            value = self.archive.read(key)
         except KeyError:
             return None
         start, end = self._byte_range(byte_range, len(value))
@@ -387,7 +387,7 @@ class _ArchiveRecords(NamedTuple):
     def get(self, key: str) -> Optional[bytes]:
         """The record (None if it doesn't exist)"""
         try:
-            return self.archive[key]
+            return self.archive.read(key)
         except KeyError:
             return None
 
