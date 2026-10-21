@@ -174,13 +174,18 @@ class IndexedTarArchive:
         return key in self._records
 
     def __getitem__(self, key: str) -> bytes:
-        """Reads the payload of a record (raises KeyError if it doesn't exist)"""
-        record = self._records[key]
+        """The payload of a record (raises KeyError if it doesn't exist), see :meth:`read`"""
+        return self.read(key)
 
-        # (records end before the index, which ends the tail read: records starting within the tail read are part of it)
-        if (tail := self._tail) is not None and record.offset >= tail.start:
-            start = record.offset - tail.start
-            return tail.data[start : start + record.size]
+    def read(self, key: str) -> bytes:
+        """Reads the payload of a record synchronously (raises KeyError if it doesn't exist).
+
+        Records held in memory (records of the index tail read) are returned directly, records of local archives are
+        read via positional reads, all other records via the archive's buffered file object.
+        """
+        record = self._records[key]
+        if (value := self._in_memory(record)) is not None:
+            return value
 
         if self._pread_fd is not None:
             return self._pread(self._pread_fd, record.offset, record.size)
@@ -192,6 +197,16 @@ class IndexedTarArchive:
             value = self._file.read(record.size)
             self._file.seek(position)
             return value
+
+    def _in_memory(self, record: IndexedTarArchive.Record) -> Optional[bytes]:
+        """The payload of a record held in memory (records of the index tail read, empty records), None otherwise"""
+        if record.size == 0:
+            return b""
+        # (records end before the index, which ends the tail read: records starting within the tail read are part of it)
+        if (tail := self._tail) is not None and record.offset >= tail.start:
+            start = record.offset - tail.start
+            return tail.data[start : start + record.size]
+        return None
 
     def __setitem__(self, key: str, value: Union[bytes, bytearray, memoryview]) -> None:
         """Appends a record (requires write mode, raises ValueError if the record exists already)"""

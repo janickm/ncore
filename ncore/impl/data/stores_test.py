@@ -81,6 +81,21 @@ class TestIndexedTarArchive(unittest.TestCase):
     def tearDown(self):
         self._tmp.cleanup()
 
+    def test_read(self):
+        """read() is the synchronous read of the mapping interface (archive[key]), incl. empty records and records of the
+        index tail read"""
+        records = {"a": b"0123456789", "empty": b"", "large": bytes(range(256)) * 64}
+        with IndexedTarArchive(self.path, mode="w") as archive:
+            for key, value in records.items():
+                archive[key] = value
+        for tail in (None, 1 << 20):  # (records read from the file, records of the tail read)
+            archive = IndexedTarArchive(self.path, index_tail_read_size=tail)
+            for key, value in records.items():
+                self.assertEqual(archive.read(key), value, key)
+                self.assertEqual(archive[key], value, key)
+            with self.assertRaises(KeyError):
+                archive.read("missing")
+
     def test_records(self):
         records = {"a": b"0123456789", "dir/b": b"x" * 513, "empty": b"", "l" * 150 + "/long-key": bytes(range(256))}
         with IndexedTarArchive(self.path, mode="w") as archive:
@@ -231,9 +246,7 @@ class TestZarrIndexedTarStore(unittest.TestCase):
         _write_itar(self.path)
 
         archive = IndexedTarArchive(self.path, index_tail_read_size=index_tail_read_size)
-        with mock.patch.object(
-            IndexedTarArchive, "__getitem__", autospec=True, side_effect=IndexedTarArchive.__getitem__
-        ) as getitem:
+        with mock.patch.object(IndexedTarArchive, "read", autospec=True, side_effect=IndexedTarArchive.read) as getitem:
             root = open_compressed_consolidated(archive, mode="r")
             _check_reference(self, root)
         # node metadata is read from the compressed consolidated metadata only
