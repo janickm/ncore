@@ -208,8 +208,8 @@ class IndexedTarArchive:
         """Reads the payload of a record synchronously (raises KeyError if it doesn't exist).
 
         Records held in memory (node metadata records of archives opened for writing, records of the index tail read)
-        are returned directly, records of local archives are read via positional reads, all other records via the
-        archive's buffered file object.
+        are returned directly, records of local archives are read via positional reads, records of remote archives via
+        the archive's buffered file object, or via exact range requests (see ``remote_range_reads``).
         """
         if (value := self._node_metadata_record(key)) is not None:
             return value
@@ -220,7 +220,7 @@ class IndexedTarArchive:
         if self._pread_fd is not None:
             return self._pread(self._pread_fd, record.offset, record.size)
 
-        if self._remote_range_reads and record.size and (fs := self._async_fs()) is not None:
+        if self._remote_range_reads and (fs := self._async_fs()) is not None:
             # (an exact range request on the filesystem's I/O loop, concurrent with those of other threads)
             return fs.cat_file(self._itar_upath.path, start=record.offset, end=record.offset + record.size)
 
