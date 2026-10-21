@@ -127,6 +127,32 @@ class TestIndexedTarArchive(unittest.TestCase):
     def tearDown(self):
         self._tmp.cleanup()
 
+    def test_read_async_of_local_archives(self):
+        """Records of local archives are read asynchronously on worker threads (not on the running event loop), records
+        held in memory directly"""
+        records = {"a": b"0123456789", "empty": b"", "large": bytes(range(256)) * 64}
+        with IndexedTarArchive(self.path, mode="w") as archive:
+            for key, value in records.items():
+                archive[key] = value
+        archive = IndexedTarArchive(self.path, index_tail_read_size=None)
+        self.assertFalse(archive.is_remote)
+        read = IndexedTarArchive.read
+        threads: Dict[str, str] = {}
+
+        def recording_read(archive: IndexedTarArchive, key: str) -> bytes:
+            threads[key] = threading.current_thread().name
+            return read(archive, key)
+
+        async def reads() -> Dict[str, bytes]:
+            return dict(zip(records, await asyncio.gather(*(archive.read_async(key) for key in records))))
+
+        with mock.patch.object(IndexedTarArchive, "read", recording_read):
+            self.assertEqual(asyncio.run(reads()), records)
+        self.assertEqual(sorted(threads), ["a", "large"])  # (empty records are held in memory)
+        self.assertNotIn(threading.current_thread().name, threads.values())
+        with self.assertRaises(KeyError):
+            asyncio.run(archive.read_async("missing"))
+
     def test_read(self):
         """read() is the synchronous read of the mapping interface (archive[key]), incl. empty records and records of the
         index tail read"""
@@ -1152,14 +1178,14 @@ class TestAsyncReads(unittest.TestCase):
         root = IndexedTarZarrStore(self.path).open_root_group()
         expected = self._reads(root)
         threads = set()
-        getitem = IndexedTarArchive.__getitem__
+        getitem = IndexedTarArchive.read
 
         def recording_getitem(archive: IndexedTarArchive, key: str) -> bytes:
             threads.add(threading.current_thread().name)
             return getitem(archive, key)
 
         with mock.patch.dict(os.environ, {"NCORE_ZARR3_DIRECT_READS": "1" if mode == "direct" else "0"}):
-            with mock.patch.object(IndexedTarArchive, "__getitem__", recording_getitem):
+            with mock.patch.object(IndexedTarArchive, "read", recording_getitem):
                 self._assert_equal(asyncio.run(self._reads_async(root)), expected)
         self.assertTrue(threads, "no record reads")
         self.assertNotIn(threading.current_thread().name, threads)
@@ -1173,14 +1199,14 @@ class TestAsyncReads(unittest.TestCase):
         root = IndexedTarZarrStore(self.path).open_root_group()
         expected = self._reads(root)
         threads = set()
-        getitem = IndexedTarArchive.__getitem__
+        getitem = IndexedTarArchive.read
 
         def recording_getitem(archive: IndexedTarArchive, key: str) -> bytes:
             threads.add(threading.current_thread().name)
             return getitem(archive, key)
 
         with mock.patch.dict(os.environ, {"NCORE_ZARR3_DIRECT_READS": "1" if mode == "direct" else "0"}):
-            with mock.patch.object(IndexedTarArchive, "__getitem__", recording_getitem):
+            with mock.patch.object(IndexedTarArchive, "read", recording_getitem):
                 self._assert_equal(backend_zarr3.run(self._reads_async(root)), expected)
         self.assertEqual(threads, {threading.current_thread().name})
 
